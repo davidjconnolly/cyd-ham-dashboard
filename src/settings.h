@@ -25,6 +25,8 @@ struct AppSettings {
   bool dxWatchAlertEnabled;
   bool dxWatchAutoPage;
   uint16_t dxWatchHoldMinutes;
+  String dxWatchBackfillUrl;
+  uint16_t dxWatchBackfillMinutes;
   uint16_t propagationRefreshMinutes;
   uint16_t dxRefreshMinutes;
   uint8_t brightnessPercent;

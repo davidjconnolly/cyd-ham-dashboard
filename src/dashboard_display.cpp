@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "dx_backfill.h"
 #include "dx_spots.h"
 #include "dx_watch.h"
 #include "greyline.h"
@@ -946,9 +947,8 @@ void drawWatchPage(const ClockSnapshot& snapshot) {
   // JSON mode only ever sees the head of the feed once per refresh, so a
   // watched call can easily come and go unseen. Say so on the page itself.
   const bool jsonOnly = settings.dxSourceMode == kDxSourceJson;
-  const String statusText = jsonOnly
-                                ? String("JSON polling only - use Telnet to catch every spot")
-                                : String("Source: ") + dx.provider + " / " + dx.status;
+  const String statusText = String("Live: ") + dx.provider + " " + dx.status +
+                            "   History: " + getDxBackfillStatus();
   drawLeftField(g_lastWatchStatus, statusText, 8, 204, 1, jsonOnly ? kWarn : kMuted, 308);
   drawFooter(snapshot);
 }
@@ -1163,6 +1163,7 @@ void displayBegin() {
   tft.init();
   tft.setRotation(kLandscapeRotation);
   dxSpotsBegin();
+  dxBackfillBegin();
   greylineBegin();
   propagationBegin();
 
@@ -1181,6 +1182,7 @@ void displayBegin() {
 void displayUpdate(const ClockSnapshot& snapshot) {
   handleTouch();
   const bool dataChanged = refreshDxSpotsIfNeeded(snapshot.wifiConnected) |
+                           dxBackfillIfNeeded(snapshot.wifiConnected) |
                            refreshPropagationIfNeeded(snapshot.wifiConnected) |
                            updateGreylineData(snapshot.epoch, snapshot.timeValid);
   const uint32_t nowMs = millis();

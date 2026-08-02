@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "app_config.h"
+#include "dx_backfill.h"
 #include "dx_watch.h"
 #include "settings.h"
 
@@ -743,6 +744,13 @@ bool parseIz3mezDxJson(Stream& stream, DxSpotsData& parsed) {
 }
 
 bool fetchDxSpots() {
+  // Parsing the feed needs a 24 KB contiguous block. Yield to an in-flight
+  // backfill stream rather than risk a NoMemory failure mid-window.
+  if (dxBackfillIsStreaming()) {
+    Serial.println("DX fetch deferred: backfill streaming");
+    return false;
+  }
+
   const String url = getDxSpotsUrl();
   if (url.length() == 0) {
     Serial.println("DX fetch skipped: DX URL not set");
@@ -806,6 +814,14 @@ void dxSpotsBegin() {
   stopDxTelnet(true);
   g_refreshRequested = true;
   dxWatchBegin();
+}
+
+String dxFormatFrequency(const String& value) {
+  return formatFrequency(value);
+}
+
+String dxDeriveMode(const String& freq, const String& comment) {
+  return deriveMode(freq, comment);
 }
 
 String getDxSpotsUrl() {

@@ -318,7 +318,31 @@ Set **DX source mode** to `Auto` or `Telnet only` for expedition monitoring. A T
 
 Cluster-side filters set against your callsign login still apply, so the watchlist can be combined with a narrowed cluster feed.
 
-Watch state is also published in `GET /status` as `dx_watch`, for polling from a phone or another host on the LAN.
+#### History backfill
+
+Live sources only report spots that arrive *after* the device connects, so a station spotted an hour ago leaves its row blank. The backfill closes that gap by seeding the rows from recent history at start-up, whenever the watchlist is edited, and on an interval.
+
+The default source is DXSummit:
+
+```text
+http://www.dxsummit.fi/api/v1/spots?limit=500
+```
+
+DXSummit's API has no per-callsign filter, only a row limit, so the device pulls a wide window and matches it on the fly. The response is streamed and parsed one object at a time in bounded chunks across loop iterations, so memory stays flat and the display keeps rendering while it downloads.
+
+Window sizes, measured against the live feed:
+
+| `limit` | history covered | transfer |
+| --- | --- | --- |
+| 100 | ~9 minutes | 24 KB |
+| 500 | ~45 minutes | 123 KB |
+| 1000 | ~95 minutes | 246 KB |
+
+Backfilled rows carry the spot's own timestamp, so a spot from 30 minutes ago reads `30m`, not `now`, and never raises an alert. A live spot always takes precedence over recovered history.
+
+DXSummit's HTTPS endpoint is unreliable; the plain `http://` URL is used deliberately. Leave the field blank to disable the backfill.
+
+Watch state is also published in `GET /status` as `dx_watch`, with backfill status in `dx_backfill`, for polling from a phone or another host on the LAN.
 
 ## Configuration Files
 
@@ -399,6 +423,7 @@ src/
   greyline.*            Solar and greyline calculations
   dx_spots.*            DX JSON fetch plus Telnet connection and parsing
   dx_watch.*            Watched callsign matching, state, and alerts
+  dx_backfill.*         Streams recent spot history to seed the watchlist
 ```
 
 ## Notes And Limits
@@ -410,7 +435,9 @@ src/
 - LVGL is not used.
 - The embedded Greyline map uses flash space; current firmware size is close to the default app partition limit.
 - The DX watchlist holds up to eight callsigns. Heard state lives in RAM and is cleared by a restart.
-- Watch ages count from when the device saw the spot, not from the spot's own timestamp. On a Telnet connection these are the same moment; a JSON poll can read a spot that is already several minutes old.
+- Watch ages use the spot's own timestamp where the source provides one, falling back to when the device saw it.
+- The backfill only reaches as far back as its window. A station last spotted before that window shows as not heard until it appears again.
+- A watched call absent from both the cluster and DXSummit is not being spotted anywhere; check the callsign before assuming a device fault.
 
 ## Troubleshooting
 

@@ -7,6 +7,7 @@
 
 #include "connectivity.h"
 #include "dashboard_display.h"
+#include "dx_backfill.h"
 #include "dx_spots.h"
 #include "dx_watch.h"
 #include "greyline.h"
@@ -144,6 +145,8 @@ String statusJson() {
   json += jsonEscape(dx.status);
   json += F("\",\"dx_source\":\"");
   json += jsonEscape(dx.source);
+  json += F("\",\"dx_backfill\":\"");
+  json += jsonEscape(getDxBackfillStatus());
   json += F("\",\"dx_watch\":[");
   for (uint8_t i = 0; i < dxWatchCount(); ++i) {
     const DxWatchEntry& entry = dxWatchEntry(i);
@@ -367,6 +370,17 @@ String pageHtml(const String& message = "") {
   html += checked(settings.dxWatchAutoPage);
   html += F(">Jump to the DX Watch page on a new hit</label>");
   html += F("<small>Page jumps are held back for 15 seconds after you touch the screen.</small></div></div>");
+  html += F("<label for='dxwbfurl'>History backfill URL</label><input id='dxwbfurl' name='dxwbfurl' maxlength='180' value='");
+  html += htmlEscape(settings.dxWatchBackfillUrl);
+  html += F("'><small>Seeds the watch rows from recent spot history at start-up, whenever you change the list, and on the interval below. Without it a watched call stays blank until its next live appearance.<br>");
+  html += F("The default is DXSummit. Its API has no per-callsign filter, so the device pulls a wide window and matches on the fly - <code>limit=500</code> covers roughly the last 45 minutes, <code>limit=1000</code> about 95. Larger windows take longer to download. Leave blank to disable.<br>");
+  html += F("Note that DXSummit's HTTPS endpoint is unreliable; the plain <code>http://</code> URL is used deliberately.</small>");
+  html += F("<label for='dxwbfmin'>Backfill every (minutes)</label><input id='dxwbfmin' name='dxwbfmin' type='number' min='1' max='240' value='");
+  html += String(settings.dxWatchBackfillMinutes);
+  html += F("'>");
+  html += F("<div>History status: <code>");
+  html += htmlEscape(getDxBackfillStatus());
+  html += F("</code></div>");
   html += F("</div>");
 
   html += F("<div class='card'><h2>Display</h2>");
@@ -455,6 +469,9 @@ void handleSave() {
   settings.dxWatchAutoPage = server.hasArg("dxwauto");
   settings.dxWatchHoldMinutes = static_cast<uint16_t>(
       constrain(server.arg("dxwhold").toInt(), 1L, 720L));
+  settings.dxWatchBackfillUrl = limitedArg("dxwbfurl", 180);
+  settings.dxWatchBackfillMinutes = static_cast<uint16_t>(
+      constrain(server.arg("dxwbfmin").toInt(), 1L, 240L));
   settings.propagationRefreshMinutes = static_cast<uint16_t>(
       constrain(server.arg("propmins").toInt(), 1L, 120L));
   settings.dxRefreshMinutes = static_cast<uint16_t>(
@@ -467,6 +484,8 @@ void handleSave() {
   settings.keepHotspotOn = server.hasArg("keepap");
   saveSettings(settings);
   dxWatchReloadPatterns();
+  // A changed list should answer immediately rather than at the next interval.
+  dxWatchRequestBackfill();
   applyTimezoneSettings();
   applyDisplaySettings();
   requestPropagationRefresh();

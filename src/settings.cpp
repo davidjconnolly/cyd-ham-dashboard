@@ -21,6 +21,10 @@ constexpr uint16_t kDefaultDxTelnetPort = 7300;
 constexpr uint16_t kDefaultPropagationRefreshMinutes = 15;
 constexpr uint16_t kDefaultDxRefreshMinutes = 5;
 constexpr uint16_t kDefaultDxWatchHoldMinutes = 15;
+// DXSummit has no per-callsign filter, so the window has to be wide enough to
+// contain a spot from the last hour. 500 rows is roughly 45 minutes.
+constexpr char kDefaultDxBackfillUrl[] = "http://www.dxsummit.fi/api/v1/spots?limit=500";
+constexpr uint16_t kDefaultDxWatchBackfillMinutes = 15;
 constexpr uint8_t kDefaultBrightnessPercent = 100;
 
 bool isPlaceholderCredential(const char* value) {
@@ -78,6 +82,7 @@ void normalizeSettings(AppSettings& settings) {
   settings.dxTelnetHost = limitedString(settings.dxTelnetHost, 64);
   settings.dxWatchList = limitedString(settings.dxWatchList, 240);
   settings.dxWatchList.toUpperCase();
+  settings.dxWatchBackfillUrl = limitedString(settings.dxWatchBackfillUrl, 180);
 
   if (settings.timezone.length() == 0) {
     settings.timezone = kDefaultTimezone;
@@ -110,6 +115,9 @@ void normalizeSettings(AppSettings& settings) {
   settings.dxWatchHoldMinutes =
       constrain(settings.dxWatchHoldMinutes, static_cast<uint16_t>(1),
                 static_cast<uint16_t>(720));
+  settings.dxWatchBackfillMinutes =
+      constrain(settings.dxWatchBackfillMinutes, static_cast<uint16_t>(1),
+                static_cast<uint16_t>(240));
   settings.brightnessPercent =
       constrain(settings.brightnessPercent, static_cast<uint8_t>(5),
                 static_cast<uint8_t>(100));
@@ -143,6 +151,9 @@ void settingsBegin() {
   currentSettings.dxWatchAutoPage = preferences.getBool("dxwauto", true);
   currentSettings.dxWatchHoldMinutes =
       preferences.getUShort("dxwhold", kDefaultDxWatchHoldMinutes);
+  currentSettings.dxWatchBackfillUrl = readStringOrDefault("dxwbfurl", kDefaultDxBackfillUrl);
+  currentSettings.dxWatchBackfillMinutes =
+      preferences.getUShort("dxwbfmin", kDefaultDxWatchBackfillMinutes);
   currentSettings.propagationRefreshMinutes =
       preferences.getUShort("propmins", kDefaultPropagationRefreshMinutes);
   currentSettings.dxRefreshMinutes = preferences.getUShort("dxmins", kDefaultDxRefreshMinutes);
@@ -179,6 +190,8 @@ void saveSettings(const AppSettings& settings) {
   preferences.putBool("dxwalert", currentSettings.dxWatchAlertEnabled);
   preferences.putBool("dxwauto", currentSettings.dxWatchAutoPage);
   preferences.putUShort("dxwhold", currentSettings.dxWatchHoldMinutes);
+  preferences.putString("dxwbfurl", currentSettings.dxWatchBackfillUrl);
+  preferences.putUShort("dxwbfmin", currentSettings.dxWatchBackfillMinutes);
   preferences.putUShort("propmins", currentSettings.propagationRefreshMinutes);
   preferences.putUShort("dxmins", currentSettings.dxRefreshMinutes);
   preferences.putUChar("bright", currentSettings.brightnessPercent);

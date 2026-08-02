@@ -1,8 +1,13 @@
 #include "dx_watch.h"
 
+#include <time.h>
+
 #include "settings.h"
 
 namespace {
+// 2024-01-01, matching the guard dx_spots uses to decide the clock is real.
+constexpr time_t kMinValidEpoch = 1704067200;
+
 DxWatchEntry g_entries[kMaxWatchEntries];
 // Reloading has to carry heard state across for patterns that survived the
 // edit. The scratch copy lives here rather than on the stack because reloads
@@ -10,6 +15,7 @@ DxWatchEntry g_entries[kMaxWatchEntries];
 DxWatchEntry g_scratch[kMaxWatchEntries];
 uint8_t g_count = 0;
 bool g_alertPending = false;
+bool g_backfillRequested = false;
 String g_alertCall;
 const DxWatchEntry kEmptyEntry;
 
@@ -117,7 +123,7 @@ void dxWatchReloadPatterns() {
   Serial.println(g_count);
 }
 
-bool dxWatchNoteSpot(const DxSpot& spot) {
+bool dxWatchNoteSpot(const DxSpot& spot, bool historical, time_t spotEpoch) {
   if (g_count == 0) {
     return false;
   }
@@ -143,6 +149,16 @@ bool dxWatchNoteSpot(const DxSpot& spot) {
       continue;
     }
 
+    // Backfill runs after the live stream is already flowing, so it must never
+    // overwrite a newer live spot with an older historical one.
+    if (historical && entry.heard && !entry.fromHistory) {
+      continue;
+    }
+    if (historical && entry.heard && entry.spotEpoch > 0 && spotEpoch > 0 &&
+        spotEpoch <= entry.spotEpoch) {
+      continue;
+    }
+
     const bool wasActive = dxWatchEntryIsActive(entry);
     entry.call = call;
     entry.freq = spot.freq;
@@ -151,24 +167,42 @@ bool dxWatchNoteSpot(const DxSpot& spot) {
     entry.spotTime = spot.time;
     entry.signature = signature;
     entry.heard = true;
+    entry.spotEpoch = spotEpoch;
     entry.heardAtMs = millis();
+    entry.fromHistory = historical;
     if (entry.hitCount < 0xFFFF) {
       ++entry.hitCount;
     }
     changed = true;
 
-    if (!wasActive) {
+    // Recovered history is not news: a spot from six hours ago must not flash
+    // the backlight as though the station just came on the air.
+    if (!wasActive && !historical) {
       g_alertPending = true;
       g_alertCall = call;
-      Serial.print("DX watch hit: ");
-      Serial.print(call);
-      Serial.print(" ");
-      Serial.print(entry.freq);
-      Serial.print(" ");
-      Serial.println(entry.mode);
     }
+    Serial.print(historical ? "DX watch history: " : "DX watch hit: ");
+    Serial.print(call);
+    Serial.print(" ");
+    Serial.print(entry.freq);
+    Serial.print(" ");
+    Serial.print(entry.mode);
+    Serial.print(" age ");
+    Serial.println(dxWatchAgeText(entry));
   }
   return changed;
+}
+
+void dxWatchRequestBackfill() {
+  g_backfillRequested = true;
+}
+
+bool dxWatchBackfillRequested() {
+  return g_backfillRequested && g_count > 0;
+}
+
+void dxWatchClearBackfillRequest() {
+  g_backfillRequested = false;
 }
 
 uint8_t dxWatchCount() {
@@ -198,6 +232,16 @@ bool dxWatchMatchesCall(const String& call) {
 uint32_t dxWatchMinutesSinceHeard(const DxWatchEntry& entry) {
   if (!entry.heard) {
     return 0;
+  }
+
+  // Prefer the spot's own timestamp. Backfilled history is hours old by
+  // definition, and even a live spot can be a few minutes stale by the time a
+  // JSON poll reads it; the millis stamp only records when we saw it.
+  if (entry.spotEpoch > 0) {
+    const time_t now = time(nullptr);
+    if (now >= kMinValidEpoch && now > entry.spotEpoch) {
+      return static_cast<uint32_t>((now - entry.spotEpoch) / 60);
+    }
   }
   return (millis() - entry.heardAtMs) / 60000UL;
 }

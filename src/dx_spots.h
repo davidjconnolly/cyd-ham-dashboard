@@ -31,3 +31,8 @@ bool refreshDxSpotsIfNeeded(bool wifiConnected);
 void requestDxSpotsRefresh();
 const DxSpotsData& getDxSpotsData();
 String getDxSpotsUrl();
+
+// Shared spot formatting, so the backfill renders frequencies and modes
+// identically to live spots.
+String dxFormatFrequency(const String& value);
+String dxDeriveMode(const String& freq, const String& comment);
