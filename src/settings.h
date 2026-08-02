@@ -21,6 +21,10 @@ struct AppSettings {
   String dxSpotsUrl;
   String dxTelnetHost;
   uint16_t dxTelnetPort;
+  String dxWatchList;
+  bool dxWatchAlertEnabled;
+  bool dxWatchAutoPage;
+  uint16_t dxWatchHoldMinutes;
   uint16_t propagationRefreshMinutes;
   uint16_t dxRefreshMinutes;
   uint8_t brightnessPercent;

@@ -8,6 +8,7 @@
 #include "connectivity.h"
 #include "dashboard_display.h"
 #include "dx_spots.h"
+#include "dx_watch.h"
 #include "greyline.h"
 #include "propagation.h"
 #include "settings.h"
@@ -123,7 +124,7 @@ String statusJson() {
   const DxSpotsData& dx = getDxSpotsData();
 
   String json;
-  json.reserve(520);
+  json.reserve(520 + (dxWatchCount() * 160));
   json += F("{\"project\":\"CYD HamClock\",");
   json += F("\"wifi\":");
   json += snapshot.wifiConnected ? F("true") : F("false");
@@ -143,8 +144,71 @@ String statusJson() {
   json += jsonEscape(dx.status);
   json += F("\",\"dx_source\":\"");
   json += jsonEscape(dx.source);
-  json += F("\"}");
+  json += F("\",\"dx_watch\":[");
+  for (uint8_t i = 0; i < dxWatchCount(); ++i) {
+    const DxWatchEntry& entry = dxWatchEntry(i);
+    if (i > 0) {
+      json += ',';
+    }
+    json += F("{\"pattern\":\"");
+    json += jsonEscape(entry.pattern);
+    json += F("\",\"heard\":");
+    json += entry.heard ? F("true") : F("false");
+    json += F(",\"active\":");
+    json += dxWatchEntryIsActive(entry) ? F("true") : F("false");
+    json += F(",\"call\":\"");
+    json += jsonEscape(entry.call);
+    json += F("\",\"freq\":\"");
+    json += jsonEscape(entry.freq);
+    json += F("\",\"mode\":\"");
+    json += jsonEscape(entry.mode);
+    json += F("\",\"spotter\":\"");
+    json += jsonEscape(entry.spotter);
+    json += F("\",\"age\":\"");
+    json += jsonEscape(dxWatchAgeText(entry));
+    json += F("\",\"spots\":");
+    json += String(entry.hitCount);
+    json += '}';
+  }
+  json += F("]}");
   return json;
+}
+
+String watchStatusHtml() {
+  const uint8_t count = dxWatchCount();
+  if (count == 0) {
+    return F("<div>DX watch: <code>no callsigns watched</code></div>");
+  }
+
+  String out;
+  out.reserve(80 * count);
+  out += F("<div>DX watch:</div>");
+  for (uint8_t i = 0; i < count; ++i) {
+    const DxWatchEntry& entry = dxWatchEntry(i);
+    out += F("<div>&nbsp;&nbsp;<code>");
+    out += htmlEscape(entry.pattern);
+    out += F("</code> ");
+    if (!entry.heard) {
+      out += F("<small>not heard</small>");
+    } else {
+      out += F("<strong class='");
+      out += dxWatchEntryIsActive(entry) ? F("ok'>") : F("warn'>");
+      out += htmlEscape(entry.call);
+      out += F("</strong> <small>");
+      out += htmlEscape(entry.freq);
+      out += F(" ");
+      out += htmlEscape(entry.mode);
+      out += F(" &middot; ");
+      out += htmlEscape(dxWatchAgeText(entry));
+      out += F(" ago &middot; ");
+      out += String(entry.hitCount);
+      out += F(" spot");
+      out += entry.hitCount == 1 ? F("") : F("s");
+      out += F("</small>");
+    }
+    out += F("</div>");
+  }
+  return out;
 }
 
 String pageHtml(const String& message = "") {
@@ -159,7 +223,7 @@ String pageHtml(const String& message = "") {
   html += F("<title>CYD HamClock Settings</title><style>");
   html += F("body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#10151c;color:#f3f7fb}");
   html += F("main{max-width:760px;margin:0 auto;padding:24px}label{display:block;margin:14px 0 6px;color:#aeb8c4}");
-  html += F("input,select{box-sizing:border-box;width:100%;padding:11px;border-radius:6px;border:1px solid #3a4653;background:#18212b;color:#fff;font-size:16px}input[type=checkbox]{width:auto;margin-right:8px}");
+  html += F("input,select,textarea{box-sizing:border-box;width:100%;padding:11px;border-radius:6px;border:1px solid #3a4653;background:#18212b;color:#fff;font-size:16px;font-family:inherit}input[type=checkbox]{width:auto;margin-right:8px}");
   html += F("button{margin-top:18px;margin-right:8px;padding:12px 16px;border:0;border-radius:6px;background:#1aa7c8;color:#001018;font-weight:700;font-size:16px}");
   html += F(".danger{background:#ffbd66}.grid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}.card{border:1px solid #293440;border-radius:8px;padding:16px;margin:16px 0;background:#141b24}.ok{color:#71e58d}.warn{color:#ffbd66}");
   html += F("small{color:#aeb8c4}code{background:#202b36;padding:2px 5px;border-radius:4px}</style></head><body><main>");
@@ -186,13 +250,17 @@ String pageHtml(const String& message = "") {
   html += String(ESP.getFreeHeap());
   html += F("</code></div><div>Current page: <code>");
   html += String(getCurrentDashboardPageNumber());
-  html += F("/5</code></div><div>Propagation: <code>");
+  html += F("/");
+  html += String(getDashboardPageCount());
+  html += F("</code></div><div>Propagation: <code>");
   html += htmlEscape(propagation.status);
   html += F("</code></div><div>DX: <code>");
   html += htmlEscape(dx.source);
   html += F(" / ");
   html += htmlEscape(dx.status);
-  html += F("</code></div><div>Setup hotspot: <strong class='");
+  html += F("</code></div>");
+  html += watchStatusHtml();
+  html += F("<div>Setup hotspot: <strong class='");
   html += hotspotActive ? F("warn'>on") : F("ok'>off");
   html += F("</strong></div><div>Setup AP: <code>");
   html += kApSsid;
@@ -278,7 +346,30 @@ String pageHtml(const String& message = "") {
   html += String(settings.propagationRefreshMinutes);
   html += F("'></div><div><label for='dxmins'>DX refresh minutes</label><input id='dxmins' name='dxmins' type='number' min='1' max='120' value='");
   html += String(settings.dxRefreshMinutes);
-  html += F("'></div></div></div><div class='card'><h2>Display</h2>");
+  html += F("'></div></div></div>");
+
+  html += F("<div class='card'><h2>DX Watchlist</h2>");
+  html += F("<label for='dxwatch'>Watched callsigns</label>");
+  html += F("<textarea id='dxwatch' name='dxwatch' rows='3' maxlength='240' placeholder='3Y0J, VP6D, FT8WW'>");
+  html += htmlEscape(settings.dxWatchList);
+  html += F("</textarea>");
+  html += F("<small>Up to 8 callsigns, separated by commas, spaces, or new lines. Every spot from both DX sources is matched against this list and shown on the <strong>DX Watch</strong> page.<br>");
+  html += F("<code>3Y0J</code> also matches <code>3Y0J/MM</code> and <code>FT4/3Y0J</code>. Add <code>*</code> for a prefix watch, for example <code>VP6*</code>.<br>");
+  html += F("For expedition monitoring set <strong>DX source mode</strong> to <code>Auto</code> or <code>Telnet only</code>: JSON polling reads just the newest few spots each refresh and will miss most appearances.</small>");
+  html += F("<div class='grid'><div><label for='dxwhold'>Active for (minutes)</label><input id='dxwhold' name='dxwhold' type='number' min='1' max='720' value='");
+  html += String(settings.dxWatchHoldMinutes);
+  html += F("'><small>How long after a spot a call counts as on the air. A later spot inside this window updates the row quietly instead of alerting again.</small></div><div>");
+  html += F("<label>Alerts</label>");
+  html += F("<label><input name='dxwalert' type='checkbox' value='1'");
+  html += checked(settings.dxWatchAlertEnabled);
+  html += F(">Flash the backlight on a new hit</label>");
+  html += F("<label><input name='dxwauto' type='checkbox' value='1'");
+  html += checked(settings.dxWatchAutoPage);
+  html += F(">Jump to the DX Watch page on a new hit</label>");
+  html += F("<small>Page jumps are held back for 15 seconds after you touch the screen.</small></div></div>");
+  html += F("</div>");
+
+  html += F("<div class='card'><h2>Display</h2>");
   html += F("<label for='bright'>Backlight brightness percent</label><input id='bright' name='bright' type='number' min='5' max='100' value='");
   html += String(settings.brightnessPercent);
   html += F("'><label><input name='swaprb' type='checkbox' value='1'");
@@ -359,6 +450,11 @@ void handleSave() {
   settings.dxTelnetHost = limitedArg("dxhost", 64);
   settings.dxTelnetPort = static_cast<uint16_t>(
       constrain(server.arg("dxport").toInt(), 1L, 65535L));
+  settings.dxWatchList = limitedArg("dxwatch", 240);
+  settings.dxWatchAlertEnabled = server.hasArg("dxwalert");
+  settings.dxWatchAutoPage = server.hasArg("dxwauto");
+  settings.dxWatchHoldMinutes = static_cast<uint16_t>(
+      constrain(server.arg("dxwhold").toInt(), 1L, 720L));
   settings.propagationRefreshMinutes = static_cast<uint16_t>(
       constrain(server.arg("propmins").toInt(), 1L, 120L));
   settings.dxRefreshMinutes = static_cast<uint16_t>(
@@ -370,6 +466,7 @@ void handleSave() {
   settings.flip180 = server.hasArg("flip180");
   settings.keepHotspotOn = server.hasArg("keepap");
   saveSettings(settings);
+  dxWatchReloadPatterns();
   applyTimezoneSettings();
   applyDisplaySettings();
   requestPropagationRefresh();

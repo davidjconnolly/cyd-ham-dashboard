@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "app_config.h"
+#include "dx_watch.h"
 #include "settings.h"
 
 #ifndef DX_SPOTS_URL
@@ -437,7 +438,11 @@ bool handleDxTelnetLine(const String& line) {
 
   DxSpot spot;
   if (parseDxClusterSpotLine(line, spot)) {
-    return addDxSpotToList(spot);
+    // The watchlist must see every spot on the stream, including ones the
+    // display list drops as duplicates, so note it before adding.
+    const bool watchChanged = dxWatchNoteSpot(spot);
+    const bool listChanged = addDxSpotToList(spot);
+    return listChanged || watchChanged;
   }
 
 #if DEBUG_DX_TELNET
@@ -719,6 +724,7 @@ bool parseIz3mezDxJson(Stream& stream, DxSpotsData& parsed) {
       if (parsed.updated == "") {
         parsed.updated = isoTimeToDisplay(spotObject["spot_datetime"].as<String>());
       }
+      dxWatchNoteSpot(spot);
       ++parsed.spotCount;
     }
   }
@@ -799,6 +805,7 @@ void dxSpotsBegin() {
   g_telnetHasCurrentSpots = false;
   stopDxTelnet(true);
   g_refreshRequested = true;
+  dxWatchBegin();
 }
 
 String getDxSpotsUrl() {

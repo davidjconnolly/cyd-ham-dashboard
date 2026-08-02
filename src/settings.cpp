@@ -20,6 +20,7 @@ constexpr char kDefaultDxTelnetHost[] = "dxspots.com";
 constexpr uint16_t kDefaultDxTelnetPort = 7300;
 constexpr uint16_t kDefaultPropagationRefreshMinutes = 15;
 constexpr uint16_t kDefaultDxRefreshMinutes = 5;
+constexpr uint16_t kDefaultDxWatchHoldMinutes = 15;
 constexpr uint8_t kDefaultBrightnessPercent = 100;
 
 bool isPlaceholderCredential(const char* value) {
@@ -75,6 +76,8 @@ void normalizeSettings(AppSettings& settings) {
   settings.propagationJsonUrl = limitedString(settings.propagationJsonUrl, 180);
   settings.dxSpotsUrl = limitedString(settings.dxSpotsUrl, 180);
   settings.dxTelnetHost = limitedString(settings.dxTelnetHost, 64);
+  settings.dxWatchList = limitedString(settings.dxWatchList, 240);
+  settings.dxWatchList.toUpperCase();
 
   if (settings.timezone.length() == 0) {
     settings.timezone = kDefaultTimezone;
@@ -104,6 +107,9 @@ void normalizeSettings(AppSettings& settings) {
   settings.dxRefreshMinutes =
       constrain(settings.dxRefreshMinutes, static_cast<uint16_t>(1),
                 static_cast<uint16_t>(120));
+  settings.dxWatchHoldMinutes =
+      constrain(settings.dxWatchHoldMinutes, static_cast<uint16_t>(1),
+                static_cast<uint16_t>(720));
   settings.brightnessPercent =
       constrain(settings.brightnessPercent, static_cast<uint8_t>(5),
                 static_cast<uint8_t>(100));
@@ -132,6 +138,11 @@ void settingsBegin() {
   currentSettings.dxSpotsUrl = readStringOrDefault("dxurl", defaultDxSpotsUrl());
   currentSettings.dxTelnetHost = readStringOrDefault("dxhost", kDefaultDxTelnetHost);
   currentSettings.dxTelnetPort = preferences.getUShort("dxport", kDefaultDxTelnetPort);
+  currentSettings.dxWatchList = preferences.getString("dxwatch", "");
+  currentSettings.dxWatchAlertEnabled = preferences.getBool("dxwalert", true);
+  currentSettings.dxWatchAutoPage = preferences.getBool("dxwauto", true);
+  currentSettings.dxWatchHoldMinutes =
+      preferences.getUShort("dxwhold", kDefaultDxWatchHoldMinutes);
   currentSettings.propagationRefreshMinutes =
       preferences.getUShort("propmins", kDefaultPropagationRefreshMinutes);
   currentSettings.dxRefreshMinutes = preferences.getUShort("dxmins", kDefaultDxRefreshMinutes);
@@ -164,6 +175,10 @@ void saveSettings(const AppSettings& settings) {
   preferences.putString("dxurl", currentSettings.dxSpotsUrl);
   preferences.putString("dxhost", currentSettings.dxTelnetHost);
   preferences.putUShort("dxport", currentSettings.dxTelnetPort);
+  preferences.putString("dxwatch", currentSettings.dxWatchList);
+  preferences.putBool("dxwalert", currentSettings.dxWatchAlertEnabled);
+  preferences.putBool("dxwauto", currentSettings.dxWatchAutoPage);
+  preferences.putUShort("dxwhold", currentSettings.dxWatchHoldMinutes);
   preferences.putUShort("propmins", currentSettings.propagationRefreshMinutes);
   preferences.putUShort("dxmins", currentSettings.dxRefreshMinutes);
   preferences.putUChar("bright", currentSettings.brightnessPercent);

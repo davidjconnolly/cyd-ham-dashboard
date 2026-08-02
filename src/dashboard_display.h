@@ -8,5 +8,6 @@ void displayBegin();
 void displayUpdate(const ClockSnapshot& snapshot);
 void applyDisplaySettings();
 uint8_t getCurrentDashboardPageNumber();
+uint8_t getDashboardPageCount();
 void displayShowMessage(const String& title, const String& subtitle);
 void requestDisplayRedraw();

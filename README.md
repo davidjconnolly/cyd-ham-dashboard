@@ -4,7 +4,7 @@ A HamClock-inspired ham radio dashboard for the ESP32-2432S028R Cheap Yellow Dis
 
 **[Flash it in your browser with the Web Flasher](https://henryscat.github.io/)**
 
-It provides a touch-controlled 320x240 landscape dashboard with UTC/local time, HamQSL propagation data, a greyline map, DX spots, Wi-Fi setup, and a local web settings page.
+It provides a touch-controlled 320x240 landscape dashboard with UTC/local time, HamQSL propagation data, a greyline map, DX spots, a DXpedition watchlist, Wi-Fi setup, and a local web settings page.
 
 https://github.com/user-attachments/assets/84a32ac5-e0f6-4b6f-89ae-bf321e0d997d
 
@@ -12,18 +12,19 @@ https://github.com/user-attachments/assets/84a32ac5-e0f6-4b6f-89ae-bf321e0d997d
 
 - ESP32-2432S028R / CYD ILI9341 display support
 - XPT2046 touch navigation
-- Five dashboard pages:
+- Six dashboard pages:
   - Clock
   - HF Propagation from HamQSL
   - VHF Conditions from HamQSL
   - Greyline map with QTH marker, sun marker, terminator, sunrise/sunset, and day/night status
   - DX spots from JSON and/or a persistent Telnet DX Cluster connection
+  - DX Watch: monitors a list of callsigns and alerts when one is spotted
 - Captive portal Wi-Fi setup, which automatically switches off a few seconds after the device confirms it has joined your Wi-Fi network (it can be switched back on from the web settings page if you need it again)
 - Local web settings page on the device IP
 - Hold the BOOT button on the back of the board for 5 seconds to factory reset all settings
 - Optional mDNS address: `http://cyd-ham.local/`
 - NTP time sync
-- Configurable callsign, locator, timezone, data URLs, refresh intervals, and brightness
+- Configurable callsign, locator, timezone, data URLs, refresh intervals, watched callsigns, and brightness
 - Settings stored in ESP32 non-volatile preferences
 - No LVGL, SD card, or external filesystem required
 
@@ -145,6 +146,7 @@ The setup page lets you configure:
 - Maidenhead locator
 - Propagation data source
 - DX source mode, JSON URL, and Telnet host/port
+- DX watchlist callsigns and alert behaviour
 - Refresh intervals
 - Backlight brightness
 - Display colour swap and orientation (90-degree rotate, 180-degree flip) for differently wired CYD panels
@@ -180,7 +182,7 @@ This web UI is intended for a trusted local network. It does not include authent
 - Tap left side: next page
 - Tap right side: previous page
 - Tap centre on HF Propagation or VHF Conditions page: manual propagation refresh
-- Tap centre on DX Spots page: manual DX refresh
+- Tap centre on DX Spots or DX Watch page: manual DX refresh
 
 The footer shows Wi-Fi status, NTP status, and current page number.
 
@@ -274,6 +276,50 @@ The default Telnet cluster is `dxspots.com:7300`. The configured station callsig
 
 The device keeps the last good spot list when a refresh or connection fails. The DX page shows whether the active data came from JSON, Telnet, or the last good result.
 
+Callsigns on the DX watchlist are drawn in green in the spot list.
+
+### DX Watch
+
+Monitors up to eight callsigns and announces them the moment they are spotted, so the dashboard can be left unattended while waiting for a DXpedition to come on the air.
+
+Each watched callsign gets its own row showing whether it has been heard, and if so on what frequency, in what mode, and how long ago:
+
+```text
+Call         Freq     Mode   Age
+3Y0J         14.074   FT8    4m
+VP6D         not heard
+FT8WW        21.023   CW     52m
+```
+
+A row is one of three states:
+
+- Green call: heard within the active window, so the station is probably on the air now
+- White call: heard, but longer ago than the active window
+- Grey pattern: not heard since the device started
+
+Configure the list in the web settings page under **DX Watchlist**. Separate callsigns with commas, spaces, or new lines:
+
+```text
+3Y0J, VP6D, FT8WW
+```
+
+Matching rules:
+
+- `3Y0J` matches the bare call and any slash form, such as `3Y0J/MM` or `FT4/3Y0J`
+- `VP6*` matches any call starting with `VP6`, for prefix hunting
+
+Other settings:
+
+- **Active for (minutes)**: how long after a spot the call counts as on the air. Default 15. Further spots inside this window update the row without alerting again, so a pileup does not alert repeatedly.
+- **Flash the backlight on a new hit**: pulses the backlight three times. Default on.
+- **Alert page jump**: switches the display to the DX Watch page on a new hit, held back for 15 seconds after a screen touch so it cannot interrupt you mid-tap. Default on.
+
+Set **DX source mode** to `Auto` or `Telnet only` for expedition monitoring. A Telnet cluster streams every spot as it is posted, which is what makes the alert timely. JSON polling only reads the newest few spots each refresh and will miss most appearances; the DX Watch page shows a warning when JSON-only mode is selected.
+
+Cluster-side filters set against your callsign login still apply, so the watchlist can be combined with a narrowed cluster feed.
+
+Watch state is also published in `GET /status` as `dx_watch`, for polling from a phone or another host on the LAN.
+
 ## Configuration Files
 
 ### `include/app_config.h`
@@ -352,6 +398,7 @@ src/
   propagation.*         HamQSL fetch and parsing
   greyline.*            Solar and greyline calculations
   dx_spots.*            DX JSON fetch plus Telnet connection and parsing
+  dx_watch.*            Watched callsign matching, state, and alerts
 ```
 
 ## Notes And Limits
@@ -362,6 +409,8 @@ src/
 - SD card storage is not required.
 - LVGL is not used.
 - The embedded Greyline map uses flash space; current firmware size is close to the default app partition limit.
+- The DX watchlist holds up to eight callsigns. Heard state lives in RAM and is cleared by a restart.
+- Watch ages count from when the device saw the spot, not from the spot's own timestamp. On a Telnet connection these are the same moment; a JSON poll can read a spot that is already several minutes old.
 
 ## Troubleshooting
 

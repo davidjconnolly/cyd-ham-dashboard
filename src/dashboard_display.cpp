@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "dx_spots.h"
+#include "dx_watch.h"
 #include "greyline.h"
 #include "greyline_map.h"
 #include "propagation.h"
@@ -23,6 +24,7 @@ enum DashboardPage : uint8_t {
   kPageVhf,
   kPageGreyline,
   kPageDx,
+  kPageWatch,
   kPageCount
 };
 
@@ -48,6 +50,15 @@ constexpr uint16_t kText = TFT_WHITE;
 constexpr uint16_t kMuted = TFT_LIGHTGREY;
 constexpr uint16_t kAccent = TFT_YELLOW;
 constexpr uint16_t kWarn = TFT_ORANGE;
+constexpr uint16_t kAlert = TFT_GREEN;
+
+constexpr uint8_t kBacklightChannel = 0;
+constexpr uint32_t kBacklightFrequency = 5000;
+constexpr uint8_t kBacklightResolution = 8;
+constexpr uint8_t kAlertFlashPulses = 3;
+constexpr uint32_t kAlertFlashIntervalMs = 160;
+constexpr uint8_t kAlertFlashDimPercent = 5;
+constexpr uint32_t kAlertPageSuppressAfterTouchMs = 15000;
 
 constexpr int16_t kMapX = 10;
 constexpr int16_t kMapY = 4;
@@ -116,6 +127,16 @@ String g_lastDxEmpty;
 String g_lastDxUpdated;
 String g_lastDxSource;
 String g_lastDxStatus;
+String g_lastWatchRows[kMaxWatchEntries];
+String g_lastWatchEmpty;
+String g_lastWatchSummary;
+String g_lastWatchStatus;
+
+uint8_t g_backlightDuty = 255;
+uint8_t g_backlightDimDuty = 0;
+uint8_t g_alertFlashPulsesLeft = 0;
+uint32_t g_nextAlertFlashMs = 0;
+bool g_alertFlashDark = false;
 
 char utcBuffer[16];
 char localBuffer[24];
@@ -193,6 +214,12 @@ void clearPageState() {
   g_lastDxUpdated = "";
   g_lastDxSource = "";
   g_lastDxStatus = "";
+  for (uint8_t i = 0; i < kMaxWatchEntries; ++i) {
+    g_lastWatchRows[i] = "";
+  }
+  g_lastWatchEmpty = "";
+  g_lastWatchSummary = "";
+  g_lastWatchStatus = "";
 }
 
 void drawCentered(const String& text, int16_t y, uint8_t font, uint16_t color = kText) {
@@ -641,14 +668,16 @@ String truncateText(const String& value, uint8_t maxLen) {
 }
 
 void drawDxSpotRow(String& last, const DxSpot& spot, int16_t y) {
-  const String rowKey = spot.freq + "|" + spot.call + "|" + spot.mode + "|" + spot.time;
+  const bool watched = dxWatchMatchesCall(spot.call);
+  const String rowKey = spot.freq + "|" + spot.call + "|" + spot.mode + "|" + spot.time + "|" +
+                        String(watched ? "1" : "0");
   if (rowKey == last) {
     return;
   }
 
   tft.fillRect(10, y - 2, tft.width() - 20, tft.fontHeight(2) + 4, kBg);
   drawLeft(truncateText(spot.freq, 7), 14, y, 2, kText);
-  drawLeft(truncateText(spot.call, 9), 82, y, 2, kAccent);
+  drawLeft(truncateText(spot.call, 9), 82, y, 2, watched ? kAlert : kAccent);
   drawLeft(truncateText(spot.mode, 5), 170, y, 2, kText);
   drawLeft(truncateText(spot.time, 5), 230, y, 2, kMuted);
   last = rowKey;
@@ -844,6 +873,86 @@ void drawDxPage(const ClockSnapshot& snapshot) {
   drawFooter(snapshot);
 }
 
+void drawWatchRow(String& last, const DxWatchEntry& entry, int16_t y) {
+  const bool active = dxWatchEntryIsActive(entry);
+  const String ageText = dxWatchAgeText(entry);
+  const String rowKey = entry.pattern + "|" + entry.call + "|" + entry.freq + "|" +
+                        entry.mode + "|" + ageText + "|" + String(active ? "1" : "0");
+  if (rowKey == last) {
+    return;
+  }
+
+  tft.fillRect(10, y - 2, tft.width() - 20, tft.fontHeight(2) + 4, kBg);
+  if (!entry.heard) {
+    drawLeft(truncateText(entry.pattern, 10), 14, y, 2, kMuted);
+    drawLeft("not heard", 130, y, 2, kMuted);
+  } else {
+    // Show the call as spotted rather than the configured pattern: it carries
+    // the suffix actually in use, and a wildcard pattern has no single call.
+    drawLeft(truncateText(entry.call, 10), 14, y, 2, active ? kAlert : kText);
+    drawLeft(truncateText(entry.freq, 7), 130, y, 2, kText);
+    drawLeft(truncateText(entry.mode, 4), 212, y, 2, kText);
+    drawLeft(truncateText(ageText, 4), 262, y, 2, active ? kAccent : kMuted);
+  }
+  last = rowKey;
+}
+
+void drawWatchPage(const ClockSnapshot& snapshot) {
+  const AppSettings& settings = getSettings();
+  const DxSpotsData& dx = getDxSpotsData();
+  const uint8_t count = dxWatchCount();
+
+  if (g_pageDirty) {
+    tft.fillScreen(kBg);
+    drawCentered("DX Watch", 4, 4, kAccent);
+    drawLeft("Call", 14, 24, 2, kMuted);
+    drawLeft("Freq", 130, 24, 2, kMuted);
+    drawLeft("Mode", 212, 24, 2, kMuted);
+    drawLeft("Age", 262, 24, 2, kMuted);
+  }
+
+  if (count == 0) {
+    drawCenteredField(g_lastWatchEmpty, "No callsigns watched", 92, 4, kMuted);
+    for (uint8_t i = 0; i < kMaxWatchEntries; ++i) {
+      g_lastWatchRows[i] = "";
+    }
+  } else {
+    if (g_lastWatchEmpty.length() > 0) {
+      tft.fillRect(0, 78, tft.width(), 40, kBg);
+      g_lastWatchEmpty = "";
+    }
+    for (uint8_t i = 0; i < kMaxWatchEntries; ++i) {
+      const int16_t y = 44 + (i * 17);
+      if (i < count) {
+        drawWatchRow(g_lastWatchRows[i], dxWatchEntry(i), y);
+      } else if (g_lastWatchRows[i].length() > 0) {
+        tft.fillRect(10, y - 2, tft.width() - 20, tft.fontHeight(2) + 4, kBg);
+        g_lastWatchRows[i] = "";
+      }
+    }
+  }
+
+  uint8_t activeCount = 0;
+  for (uint8_t i = 0; i < count; ++i) {
+    if (dxWatchEntryIsActive(dxWatchEntry(i))) {
+      ++activeCount;
+    }
+  }
+
+  drawLeftField(g_lastWatchSummary,
+                "Watching: " + String(count) + "   Active: " + String(activeCount), 8, 186, 2,
+                activeCount > 0 ? kAlert : kMuted, 300);
+
+  // JSON mode only ever sees the head of the feed once per refresh, so a
+  // watched call can easily come and go unseen. Say so on the page itself.
+  const bool jsonOnly = settings.dxSourceMode == kDxSourceJson;
+  const String statusText = jsonOnly
+                                ? String("JSON polling only - use Telnet to catch every spot")
+                                : String("Source: ") + dx.provider + " / " + dx.status;
+  drawLeftField(g_lastWatchStatus, statusText, 8, 204, 1, jsonOnly ? kWarn : kMuted, 308);
+  drawFooter(snapshot);
+}
+
 void drawCurrentPage(const ClockSnapshot& snapshot) {
   switch (g_currentPage) {
     case kPageClock:
@@ -860,6 +969,9 @@ void drawCurrentPage(const ClockSnapshot& snapshot) {
       break;
     case kPageDx:
       drawDxPage(snapshot);
+      break;
+    case kPageWatch:
+      drawWatchPage(snapshot);
       break;
     default:
       g_currentPage = kPageClock;
@@ -881,6 +993,62 @@ void previousPage() {
   g_currentPage = static_cast<DashboardPage>(page == 0 ? kPageCount - 1 : page - 1);
   clearPageState();
   g_pageDirty = true;
+}
+
+void goToPage(DashboardPage page) {
+  if (g_currentPage == page) {
+    return;
+  }
+  g_currentPage = page;
+  clearPageState();
+  g_pageDirty = true;
+}
+
+uint8_t dutyForBrightness(uint8_t percent) {
+  percent = constrain(percent, static_cast<uint8_t>(0), static_cast<uint8_t>(100));
+  uint8_t duty = map(percent, 0, 100, 0, 255);
+#ifdef TFT_BL
+#if TFT_BACKLIGHT_ON == LOW
+  duty = 255 - duty;
+#endif
+#endif
+  return duty;
+}
+
+void setBacklightDuty(uint8_t duty) {
+#ifdef TFT_BL
+  ledcWrite(kBacklightChannel, duty);
+#else
+  (void)duty;
+#endif
+}
+
+void startAlertFlash() {
+  g_alertFlashPulsesLeft = kAlertFlashPulses;
+  g_alertFlashDark = false;
+  g_nextAlertFlashMs = millis();
+}
+
+// Pulses the backlight without blocking the loop, so a watched call announces
+// itself even when the dashboard is across the room on another page.
+void updateAlertFlash(uint32_t nowMs) {
+  if (g_alertFlashPulsesLeft == 0) {
+    return;
+  }
+  if (static_cast<int32_t>(nowMs - g_nextAlertFlashMs) < 0) {
+    return;
+  }
+
+  g_alertFlashDark = !g_alertFlashDark;
+  setBacklightDuty(g_alertFlashDark ? g_backlightDimDuty : g_backlightDuty);
+  g_nextAlertFlashMs = nowMs + kAlertFlashIntervalMs;
+
+  if (!g_alertFlashDark) {
+    --g_alertFlashPulsesLeft;
+    if (g_alertFlashPulsesLeft == 0) {
+      setBacklightDuty(g_backlightDuty);
+    }
+  }
 }
 
 uint16_t readTouchAxis(uint8_t command) {
@@ -970,11 +1138,16 @@ void handleTouch() {
         g_lastVhfStatus = "";
         drawLeftField(g_lastVhfStatus, "Status: Refreshing", 166, 194, 2, kMuted);
       }
-    } else if (g_currentPage == kPageDx &&
+    } else if ((g_currentPage == kPageDx || g_currentPage == kPageWatch) &&
                x >= tft.width() / 3 && x <= (tft.width() * 2) / 3) {
       requestDxSpotsRefresh();
-      g_lastDxStatus = "";
-      drawLeftField(g_lastDxStatus, "Status: Refreshing", 8, 204, 1, kMuted, 308);
+      if (g_currentPage == kPageDx) {
+        g_lastDxStatus = "";
+        drawLeftField(g_lastDxStatus, "Status: Refreshing", 8, 204, 1, kMuted, 308);
+      } else {
+        g_lastWatchStatus = "";
+        drawLeftField(g_lastWatchStatus, "Refreshing", 8, 204, 1, kMuted, 308);
+      }
     } else if (x < tft.width() / 2) {
       nextPage();
     } else {
@@ -1011,6 +1184,25 @@ void displayUpdate(const ClockSnapshot& snapshot) {
                            refreshPropagationIfNeeded(snapshot.wifiConnected) |
                            updateGreylineData(snapshot.epoch, snapshot.timeValid);
   const uint32_t nowMs = millis();
+
+  String alertCall;
+  if (dxWatchTakeAlert(alertCall)) {
+    const AppSettings& settings = getSettings();
+    Serial.print("DX watch alert: ");
+    Serial.println(alertCall);
+    // Do not yank the page out from under someone who is using the touch
+    // screen right now; the flash still fires.
+    if (settings.dxWatchAutoPage &&
+        (g_lastTouchActionMs == 0 ||
+         nowMs - g_lastTouchActionMs >= kAlertPageSuppressAfterTouchMs)) {
+      goToPage(kPageWatch);
+    }
+    if (settings.dxWatchAlertEnabled) {
+      startAlertFlash();
+    }
+  }
+  updateAlertFlash(nowMs);
+
   if (g_pageDirty || dataChanged || nowMs - g_lastRenderMs >= kRenderIntervalMs) {
     drawCurrentPage(snapshot);
     g_lastRenderMs = nowMs;
@@ -1040,19 +1232,17 @@ void applyDisplaySettings() {
   tft.endWrite();
 
 #ifdef TFT_BL
-  constexpr uint8_t kBacklightChannel = 0;
-  constexpr uint32_t kBacklightFrequency = 5000;
-  constexpr uint8_t kBacklightResolution = 8;
-
   const uint8_t brightness = constrain(settings.brightnessPercent, static_cast<uint8_t>(5),
                                        static_cast<uint8_t>(100));
-  uint8_t duty = map(brightness, 0, 100, 0, 255);
-#if TFT_BACKLIGHT_ON == LOW
-  duty = 255 - duty;
-#endif
+  g_backlightDuty = dutyForBrightness(brightness);
+  g_backlightDimDuty = dutyForBrightness(kAlertFlashDimPercent);
+
   ledcSetup(kBacklightChannel, kBacklightFrequency, kBacklightResolution);
   ledcAttachPin(TFT_BL, kBacklightChannel);
-  ledcWrite(kBacklightChannel, duty);
+  // Cancel any flash in progress so a settings change cannot leave the
+  // backlight parked at the dim duty cycle.
+  g_alertFlashPulsesLeft = 0;
+  setBacklightDuty(g_backlightDuty);
 #endif
 
   clearPageState();
@@ -1061,6 +1251,10 @@ void applyDisplaySettings() {
 
 uint8_t getCurrentDashboardPageNumber() {
   return static_cast<uint8_t>(g_currentPage) + 1;
+}
+
+uint8_t getDashboardPageCount() {
+  return static_cast<uint8_t>(kPageCount);
 }
 
 void displayShowMessage(const String& title, const String& subtitle) {
