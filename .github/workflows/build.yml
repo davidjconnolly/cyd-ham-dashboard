@@ -1,0 +1,30 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.x' }
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      # Both display variants, because they differ only by an -include of a
+      # TFT_eSPI User_Setup header: a change that compiles against one can
+      # easily fail against the other.
+      - name: Build both display variants
+        run: pio run
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            .pio/build/esp32-2432s028r/firmware.bin
+            .pio/build/esp32-2432s028r-st7789/firmware.bin
