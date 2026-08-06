@@ -24,7 +24,13 @@ namespace {
 #endif
 
 constexpr uint32_t kHttpTimeoutMs = 5000;
-constexpr size_t kMaxDxObjectChars = 4096;
+constexpr size_t kMaxDxObjectChars = 1536;
+constexpr size_t kDxObjectDocBytes = 2048;
+// A narrow mode filter can reject nearly all of a feed, so the scan is allowed
+// to read the whole of a typical one rather than give up with a half-empty
+// page. Without a filter it still stops at the eighth spot. The time budget
+// above is the real guard against a pathologically large endpoint.
+constexpr uint16_t kMaxDxObjectsScanned = 250;
 constexpr uint32_t kTelnetReconnectIntervalMs = 30000;
 constexpr uint32_t kTelnetLoginDelayMs = 1500;
 constexpr int32_t kTelnetConnectTimeoutMs = 5000;
@@ -148,6 +154,20 @@ String upperCopy(String value) {
   return value;
 }
 
+// Order matters: the comment scan takes the first hit, so SSB is tested before
+// USB and LSB. The unknown catch-all is always the last entry.
+constexpr DxModeOption kDxModeOptions[kDxModeOptionCount] = {
+    {"FT8", "FT8", kDxModeFt8},     {"FT4", "FT4", kDxModeFt4},
+    {"CW", "CW", kDxModeCw},        {"SSB", "SSB", kDxModeSsb},
+    {"USB", "USB", kDxModeUsb},     {"LSB", "LSB", kDxModeLsb},
+    {"RTTY", "RTTY", kDxModeRtty},  {"SSTV", "SSTV", kDxModeSstv},
+    {"PSK", "PSK", kDxModePsk},     {"--", "Unknown", kDxModeUnknown},
+};
+
+uint16_t enabledModeMask() {
+  return getSettings().dxModeMask & static_cast<uint16_t>(kDxModeAll);
+}
+
 bool containsModeToken(const String& comment, const char* token) {
   return comment.indexOf(token) >= 0;
 }
@@ -181,10 +201,9 @@ String formatFrequency(String value) {
 
 String deriveMode(const String& freq, const String& comment) {
   const String upperComment = upperCopy(comment);
-  const char* modes[] = { "FT8", "FT4", "CW", "SSB", "USB", "LSB", "RTTY", "SSTV", "PSK" };
-  for (const char* mode : modes) {
-    if (containsModeToken(upperComment, mode)) {
-      return String(mode);
+  for (uint8_t i = 0; i + 1 < kDxModeOptionCount; ++i) {
+    if (containsModeToken(upperComment, kDxModeOptions[i].name)) {
+      return String(kDxModeOptions[i].name);
     }
   }
 
@@ -438,7 +457,8 @@ bool handleDxTelnetLine(const String& line) {
   }
 
   DxSpot spot;
-  if (parseDxClusterSpotLine(line, spot)) {
+  const bool isSpotLine = parseDxClusterSpotLine(line, spot);
+  if (isSpotLine && dxModeIsEnabled(spot.mode)) {
     // The watchlist must see every spot on the stream, including ones the
     // display list drops as duplicates, so note it before adding.
     const bool watchChanged = dxWatchNoteSpot(spot);
@@ -447,10 +467,16 @@ bool handleDxTelnetLine(const String& line) {
   }
 
 #if DEBUG_DX_TELNET
-  if (line.startsWith("DX de ")) {
+  if (isSpotLine) {
+    Serial.print("DX Telnet mode filtered: ");
+    Serial.println(spot.mode);
+  } else if (line.startsWith("DX de ")) {
     Serial.println("DX Telnet spot parse failed");
   }
 #endif
+
+  // A spot dropped by the mode filter still proves the stream is alive, so the
+  // status settles to "Reading" either way.
   if (g_telnetLoggedIn && g_data.status != "Reading") {
     setTelnetStatus("Reading");
     return true;
@@ -603,18 +629,67 @@ void markDxFailure(const String& status, const String& attemptedSource,
   }
 }
 
-bool readDxArrayPrefix(Stream& stream, String& arrayJson) {
-  arrayJson = "[";
+// Returns true when the spot was kept. A rejected spot is invisible to the
+// dashboard, so the mode filter is applied before the watchlist sees it.
+bool appendJsonSpot(JsonObject spotObject, DxSpotsData& parsed) {
+  if (parsed.spotCount >= kMaxDxSpots) {
+    return false;
+  }
+
+  DxSpot spot;
+  spot.time = formatSpotTime(spotObject["spot_time"].as<String>());
+  spot.freq = formatFrequency(spotObject["frequency"].as<String>());
+  spot.call = valueOrDash(spotObject["spotted"].as<String>());
+  spot.spotter = valueOrDash(spotObject["spotter"].as<String>());
+  spot.comment = valueOrDash(spotObject["spotter_comment"].as<String>());
+  spot.band = valueOrDash(spotObject["band"].as<String>());
+  spot.country = valueOrDash(spotObject["spotted_country"].as<String>());
+  spot.continent = valueOrDash(spotObject["spotted_continent"].as<String>());
+  spot.mode = deriveMode(spot.freq, spot.comment);
+
+  if (spot.freq == "--" || spot.call == "--" || !dxModeIsEnabled(spot.mode)) {
+    return false;
+  }
+
+  if (parsed.updated == "") {
+    parsed.updated = isoTimeToDisplay(spotObject["spot_datetime"].as<String>());
+  }
+  dxWatchNoteSpot(spot);
+  parsed.spots[parsed.spotCount] = spot;
+  ++parsed.spotCount;
+  return true;
+}
+
+enum DxJsonResult : uint8_t {
+  kDxJsonOk,
+  // The feed read cleanly, but the mode filter kept none of it. That is a
+  // filter that matched nothing, not a broken feed, and it reads differently.
+  kDxJsonNoMatch,
+  kDxJsonFailed
+};
+
+// The feed is scanned one object at a time rather than buffered whole: memory
+// stays flat, and a mode filter can keep reading until it has eight spots it
+// wants instead of eight the feed happened to send first.
+DxJsonResult parseIz3mezDxJson(Stream& stream, DxSpotsData& parsed) {
+  parsed = DxSpotsData();
+
+  DynamicJsonDocument doc(kDxObjectDocBytes);
+  String objectBuffer;
+  objectBuffer.reserve(kMaxDxObjectChars);
+
   bool foundArray = false;
-  bool readingObject = false;
+  bool inObject = false;
   bool inString = false;
   bool escaped = false;
+  bool objectOverflow = false;
+  bool finished = false;
   int depth = 0;
-  uint8_t objectsRead = 0;
+  uint16_t objectsScanned = 0;
   const uint32_t startMs = millis();
 
-  while (millis() - startMs < kHttpTimeoutMs) {
-    while (stream.available() > 0) {
+  while (!finished && millis() - startMs < kHttpTimeoutMs) {
+    while (!finished && stream.available() > 0) {
       const char c = static_cast<char>(stream.read());
 
       if (!foundArray) {
@@ -624,26 +699,23 @@ bool readDxArrayPrefix(Stream& stream, String& arrayJson) {
         continue;
       }
 
-      if (!readingObject) {
+      if (!inObject) {
         if (c == '{') {
-          readingObject = true;
+          inObject = true;
+          objectOverflow = false;
           depth = 1;
-          if (objectsRead > 0) {
-            arrayJson += ',';
-          }
-          arrayJson += "{";
+          objectBuffer = "{";
         } else if (c == ']') {
-          arrayJson += "]";
-          return objectsRead > 0;
+          finished = true;
         }
         continue;
       }
 
-      if (arrayJson.length() >= kMaxDxObjectChars * kMaxDxSpots) {
-        Serial.println("DX JSON parse result: trimmed array too large");
-        return false;
+      if (objectBuffer.length() < kMaxDxObjectChars) {
+        objectBuffer += c;
+      } else {
+        objectOverflow = true;
       }
-      arrayJson += c;
 
       if (inString) {
         if (escaped) {
@@ -662,90 +734,56 @@ bool readDxArrayPrefix(Stream& stream, String& arrayJson) {
         ++depth;
       } else if (c == '}') {
         --depth;
-        if (depth == 0) {
-          ++objectsRead;
-          readingObject = false;
-          if (objectsRead >= kMaxDxSpots) {
-            arrayJson += "]";
-            Serial.print("DX spot objects buffered: ");
-            Serial.println(objectsRead);
-            return true;
+        if (depth > 0) {
+          continue;
+        }
+
+        inObject = false;
+        ++objectsScanned;
+        if (!objectOverflow) {
+          doc.clear();
+          if (!deserializeJson(doc, objectBuffer) && doc.is<JsonObject>()) {
+            appendJsonSpot(doc.as<JsonObject>(), parsed);
           }
+        }
+        objectBuffer = "";
+        if (parsed.spotCount >= kMaxDxSpots || objectsScanned >= kMaxDxObjectsScanned) {
+          finished = true;
         }
       }
     }
-    delay(1);
-  }
-
-  Serial.println("DX JSON parse result: stream timeout");
-  return false;
-}
-
-bool parseIz3mezDxJson(Stream& stream, DxSpotsData& parsed) {
-  String arrayJson;
-  arrayJson.reserve(kMaxDxObjectChars * 3);
-  if (!readDxArrayPrefix(stream, arrayJson)) {
-    Serial.println("DX JSON parse result: no buffered spots");
-    return false;
-  }
-
-  DynamicJsonDocument doc(24576);
-  DeserializationError error = deserializeJson(doc, arrayJson);
-  if (error) {
-    Serial.print("DX JSON parse result: ");
-    Serial.println(error.c_str());
-    Serial.print("DX buffered JSON length: ");
-    Serial.println(arrayJson.length());
-    return false;
-  }
-  if (!doc.is<JsonArray>()) {
-    Serial.println("DX JSON parse result: expected buffered array");
-    return false;
-  }
-
-  parsed = DxSpotsData();
-  JsonArray spots = doc.as<JsonArray>();
-  for (JsonObject spotObject : spots) {
-    if (parsed.spotCount >= kMaxDxSpots) {
-      break;
+    if (!finished) {
+      delay(1);
     }
+  }
 
-    DxSpot& spot = parsed.spots[parsed.spotCount];
-    spot.time = formatSpotTime(spotObject["spot_time"].as<String>());
-    spot.freq = formatFrequency(spotObject["frequency"].as<String>());
-    spot.call = valueOrDash(spotObject["spotted"].as<String>());
-    spot.spotter = valueOrDash(spotObject["spotter"].as<String>());
-    spot.comment = valueOrDash(spotObject["spotter_comment"].as<String>());
-    spot.band = valueOrDash(spotObject["band"].as<String>());
-    spot.country = valueOrDash(spotObject["spotted_country"].as<String>());
-    spot.continent = valueOrDash(spotObject["spotted_continent"].as<String>());
-    spot.mode = deriveMode(spot.freq, spot.comment);
-
-    if (spot.freq != "--" && spot.call != "--") {
-      if (parsed.updated == "") {
-        parsed.updated = isoTimeToDisplay(spotObject["spot_datetime"].as<String>());
-      }
-      dxWatchNoteSpot(spot);
-      ++parsed.spotCount;
-    }
+  if (!finished) {
+    Serial.println("DX JSON parse result: stream timeout");
+  }
+  if (parsed.spotCount == 0) {
+    Serial.print("DX JSON parse result: no usable spots in ");
+    Serial.print(objectsScanned);
+    Serial.println(" objects");
+    return objectsScanned > 0 && dxModeFilterIsActive() ? kDxJsonNoMatch : kDxJsonFailed;
   }
 
   parsed.updated = valueOrDash(parsed.updated);
   parsed.source = "JSON";
   parsed.provider = jsonProviderName();
-  parsed.hasData = parsed.spotCount > 0;
+  parsed.hasData = true;
   parsed.status = "OK";
   Serial.println("DX JSON parse result: OK");
-  Serial.print("DX buffered JSON length: ");
-  Serial.println(arrayJson.length());
   Serial.print("DX spots parsed: ");
-  Serial.println(parsed.spotCount);
-  return parsed.hasData;
+  Serial.print(parsed.spotCount);
+  Serial.print(" of ");
+  Serial.print(objectsScanned);
+  Serial.println(" scanned");
+  return kDxJsonOk;
 }
 
 bool fetchDxSpots() {
-  // Parsing the feed needs a 24 KB contiguous block. Yield to an in-flight
-  // backfill stream rather than risk a NoMemory failure mid-window.
+  // Two HTTP streams at once is more than the radio and the heap handle
+  // comfortably, so yield to an in-flight backfill.
   if (dxBackfillIsStreaming()) {
     Serial.println("DX fetch deferred: backfill streaming");
     return false;
@@ -786,11 +824,15 @@ bool fetchDxSpots() {
   }
 
   DxSpotsData parsed;
-  bool parsedOk = parseIz3mezDxJson(http.getStream(), parsed);
+  const DxJsonResult result = parseIz3mezDxJson(http.getStream(), parsed);
   http.end();
 
-  if (!parsedOk) {
-    markDxFailure("Parse failed", "JSON", jsonProviderName());
+  if (result != kDxJsonOk) {
+    // Auto mode reads a false here as "JSON had nothing usable" and moves to
+    // Telnet, which is the right answer for an empty filter match too: the
+    // stream will find the wanted modes eventually. Only the wording differs.
+    markDxFailure(result == kDxJsonNoMatch ? "No matching modes" : "Parse failed", "JSON",
+                  jsonProviderName());
     return false;
   }
 
@@ -822,6 +864,66 @@ String dxFormatFrequency(const String& value) {
 
 String dxDeriveMode(const String& freq, const String& comment) {
   return deriveMode(freq, comment);
+}
+
+const DxModeOption& dxModeOption(uint8_t index) {
+  return kDxModeOptions[index < kDxModeOptionCount ? index : kDxModeOptionCount - 1];
+}
+
+uint16_t dxModeBitForName(const String& name) {
+  for (uint8_t i = 0; i < kDxModeOptionCount; ++i) {
+    if (name.equalsIgnoreCase(kDxModeOptions[i].name)) {
+      return kDxModeOptions[i].bit;
+    }
+  }
+  return 0;
+}
+
+bool dxModeIsEnabled(const String& mode) {
+  const uint16_t mask = enabledModeMask();
+  if (mask == 0 || mask == kDxModeAll) {
+    return true;
+  }
+  // Anything the mode derivation could not name is treated as unknown rather
+  // than quietly disappearing.
+  const uint16_t bit = dxModeBitForName(mode);
+  return (mask & (bit != 0 ? bit : static_cast<uint16_t>(kDxModeUnknown))) != 0;
+}
+
+bool dxModeFilterIsActive() {
+  const uint16_t mask = enabledModeMask();
+  return mask != 0 && mask != kDxModeAll;
+}
+
+String dxModeFilterSummary() {
+  if (!dxModeFilterIsActive()) {
+    return "";
+  }
+
+  const uint16_t mask = enabledModeMask();
+  uint8_t selected = 0;
+  for (uint8_t i = 0; i < kDxModeOptionCount; ++i) {
+    if ((mask & kDxModeOptions[i].bit) != 0) {
+      ++selected;
+    }
+  }
+  // Both pages append this to a status line that is already close to the panel
+  // width, so the named form is only used while it stays short.
+  if (selected > 2) {
+    return String(selected) + " modes";
+  }
+
+  String summary;
+  for (uint8_t i = 0; i < kDxModeOptionCount; ++i) {
+    if ((mask & kDxModeOptions[i].bit) == 0) {
+      continue;
+    }
+    if (summary.length() > 0) {
+      summary += '/';
+    }
+    summary += kDxModeOptions[i].label;
+  }
+  return summary;
 }
 
 String getDxSpotsUrl() {
@@ -913,6 +1015,24 @@ bool refreshDxSpotsIfNeeded(bool wifiConnected) {
 
 void requestDxSpotsRefresh() {
   g_refreshRequested = true;
+
+  // Saving a tighter mode filter must not leave rows on screen that the filter
+  // now rejects, so drop them here rather than waiting for the next spot.
+  uint8_t kept = 0;
+  for (uint8_t i = 0; i < g_data.spotCount; ++i) {
+    if (!dxModeIsEnabled(g_data.spots[i].mode)) {
+      continue;
+    }
+    if (kept != i) {
+      g_data.spots[kept] = g_data.spots[i];
+    }
+    ++kept;
+  }
+  for (uint8_t i = kept; i < g_data.spotCount; ++i) {
+    g_data.spots[i] = DxSpot();
+  }
+  g_data.spotCount = kept;
+  g_data.hasData = kept > 0;
 }
 
 const DxSpotsData& getDxSpotsData() {

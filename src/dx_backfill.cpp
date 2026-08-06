@@ -139,7 +139,9 @@ bool handleObject(const String& json) {
   spot.country = valueOrDash(doc["dx_country"].as<String>());
   spot.continent = "--";
 
-  if (spot.freq == "--") {
+  // History has to obey the same mode filter as the live sources, otherwise a
+  // backfill would refill a watch row with a mode the user excluded.
+  if (spot.freq == "--" || !dxModeIsEnabled(spot.mode)) {
     return false;
   }
 

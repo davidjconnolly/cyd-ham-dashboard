@@ -145,6 +145,8 @@ String statusJson() {
   json += jsonEscape(dx.status);
   json += F("\",\"dx_source\":\"");
   json += jsonEscape(dx.source);
+  json += F("\",\"dx_modes\":\"");
+  json += jsonEscape(dxModeFilterIsActive() ? dxModeFilterSummary() : String("all"));
   json += F("\",\"dx_backfill\":\"");
   json += jsonEscape(getDxBackfillStatus());
   json += F("\",\"dx_watch\":[");
@@ -229,6 +231,7 @@ String pageHtml(const String& message = "") {
   html += F("input,select,textarea{box-sizing:border-box;width:100%;padding:11px;border-radius:6px;border:1px solid #3a4653;background:#18212b;color:#fff;font-size:16px;font-family:inherit}input[type=checkbox]{width:auto;margin-right:8px}");
   html += F("button{margin-top:18px;margin-right:8px;padding:12px 16px;border:0;border-radius:6px;background:#1aa7c8;color:#001018;font-weight:700;font-size:16px}");
   html += F(".danger{background:#ffbd66}.grid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}.card{border:1px solid #293440;border-radius:8px;padding:16px;margin:16px 0;background:#141b24}.ok{color:#71e58d}.warn{color:#ffbd66}");
+  html += F(".modes{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:0 12px}.modes label{margin:6px 0;color:#f3f7fb}");
   html += F("small{color:#aeb8c4}code{background:#202b36;padding:2px 5px;border-radius:4px}</style></head><body><main>");
   html += F("<h1>CYD HamClock Settings</h1>");
 
@@ -261,6 +264,8 @@ String pageHtml(const String& message = "") {
   html += htmlEscape(dx.source);
   html += F(" / ");
   html += htmlEscape(dx.status);
+  html += F("</code></div><div>DX modes: <code>");
+  html += dxModeFilterIsActive() ? htmlEscape(dxModeFilterSummary()) : String("all");
   html += F("</code></div>");
   html += watchStatusHtml();
   html += F("<div>Setup hotspot: <strong class='");
@@ -349,7 +354,30 @@ String pageHtml(const String& message = "") {
   html += String(settings.propagationRefreshMinutes);
   html += F("'></div><div><label for='dxmins'>DX refresh minutes</label><input id='dxmins' name='dxmins' type='number' min='1' max='120' value='");
   html += String(settings.dxRefreshMinutes);
-  html += F("'></div></div></div>");
+  html += F("'></div></div>");
+  html += F("<label>DX spot modes</label><div class='modes'>");
+  // The unknown catch-all is the last entry and gets its own control below,
+  // because including or excluding unlabelled spots is the decision that
+  // actually changes how full the page looks.
+  for (uint8_t i = 0; i + 1 < kDxModeOptionCount; ++i) {
+    const DxModeOption& option = dxModeOption(i);
+    html += F("<label><input name='dxm' type='checkbox' value='");
+    html += option.name;
+    html += F("'");
+    html += checked((settings.dxModeMask & option.bit) != 0);
+    html += F(">");
+    html += option.label;
+    html += F("</label>");
+  }
+  html += F("</div><small>Only the ticked modes are registered. Unticked ones are dropped as they arrive, so they appear neither in the spot list nor on the <strong>DX Watch</strong> page. Ticking every box, or none, means no filtering.</small>");
+  html += F("<label>Unrecognised modes</label>");
+  html += F("<label><input name='dxm' type='checkbox' value='");
+  html += dxModeOption(kDxModeOptionCount - 1).name;
+  html += F("'");
+  html += checked((settings.dxModeMask & kDxModeUnknown) != 0);
+  html += F(">Include spots whose mode cannot be worked out</label>");
+  html += F("<small>The mode is read from the spotter's comment, falling back to the FT8 and FT4 calling frequencies. Many spotters label nothing, so a large share of any feed lands here as <code>Unknown</code>.<br>");
+  html += F("Leave this ticked to keep those spots. Untick it to see only spots that state their mode - a much shorter list, and a genuine SSB or CW contact whose spotter said nothing is lost with it.</small></div>");
 
   html += F("<div class='card'><h2>DX Watchlist</h2>");
   html += F("<label for='dxwatch'>Watched callsigns</label>");
@@ -460,6 +488,15 @@ void handleSave() {
   settings.dxSourceMode = dxMode == "json" ? kDxSourceJson
                           : dxMode == "telnet" ? kDxSourceTelnet
                                                 : kDxSourceAuto;
+  // Checkboxes sharing one name arrive as repeated arguments, so the mask has
+  // to be rebuilt by walking the whole argument list.
+  uint16_t modeMask = 0;
+  for (int i = 0; i < server.args(); ++i) {
+    if (server.argName(i) == "dxm") {
+      modeMask |= dxModeBitForName(server.arg(i));
+    }
+  }
+  settings.dxModeMask = modeMask;
   settings.dxSpotsUrl = limitedArg("dxurl", 180);
   settings.dxTelnetHost = limitedArg("dxhost", 64);
   settings.dxTelnetPort = static_cast<uint16_t>(

@@ -100,6 +100,12 @@ void normalizeSettings(AppSettings& settings) {
       settings.dxSourceMode != kDxSourceAuto) {
     settings.dxSourceMode = kDxSourceAuto;
   }
+  // An empty mode selection would hide every spot, which reads as a broken
+  // feed rather than a filter, so it means "no filter" instead.
+  settings.dxModeMask &= static_cast<uint16_t>(kDxModeAll);
+  if (settings.dxModeMask == 0) {
+    settings.dxModeMask = kDxModeAll;
+  }
   if (settings.dxTelnetHost.length() == 0) {
     settings.dxTelnetHost = kDefaultDxTelnetHost;
   }
@@ -143,6 +149,8 @@ void settingsBegin() {
   currentSettings.propagationJsonUrl = readStringOrDefault("propurl", PROPAGATION_JSON_URL);
   currentSettings.dxSourceMode = static_cast<DxSourceMode>(
       preferences.getUChar("dxmode", static_cast<uint8_t>(kDxSourceAuto)));
+  currentSettings.dxModeMask =
+      preferences.getUShort("dxmodes", static_cast<uint16_t>(kDxModeAll));
   currentSettings.dxSpotsUrl = readStringOrDefault("dxurl", defaultDxSpotsUrl());
   currentSettings.dxTelnetHost = readStringOrDefault("dxhost", kDefaultDxTelnetHost);
   currentSettings.dxTelnetPort = preferences.getUShort("dxport", kDefaultDxTelnetPort);
@@ -183,6 +191,7 @@ void saveSettings(const AppSettings& settings) {
   preferences.putBool("propjson", currentSettings.useJsonPropagationProxy);
   preferences.putString("propurl", currentSettings.propagationJsonUrl);
   preferences.putUChar("dxmode", static_cast<uint8_t>(currentSettings.dxSourceMode));
+  preferences.putUShort("dxmodes", currentSettings.dxModeMask);
   preferences.putString("dxurl", currentSettings.dxSpotsUrl);
   preferences.putString("dxhost", currentSettings.dxTelnetHost);
   preferences.putUShort("dxport", currentSettings.dxTelnetPort);
