@@ -662,6 +662,9 @@ bool appendJsonSpot(JsonObject spotObject, DxSpotsData& parsed) {
 
 enum DxJsonResult : uint8_t {
   kDxJsonOk,
+  // Spots were found, but the scan stopped before the end of the feed with the
+  // list still unfilled, so a wider scan might have found more. Carries data.
+  kDxJsonPartial,
   // The feed read cleanly, but the mode filter kept none of it. That is a
   // filter that matched nothing, not a broken feed, and it reads differently.
   kDxJsonNoMatch,
@@ -684,6 +687,9 @@ DxJsonResult parseIz3mezDxJson(Stream& stream, DxSpotsData& parsed) {
   bool escaped = false;
   bool objectOverflow = false;
   bool finished = false;
+  // Whether the closing ']' was seen. A scan that stops for any other reason
+  // has not seen the whole feed, which the caller has to be able to tell.
+  bool reachedEnd = false;
   int depth = 0;
   uint16_t objectsScanned = 0;
   const uint32_t startMs = millis();
@@ -704,8 +710,15 @@ DxJsonResult parseIz3mezDxJson(Stream& stream, DxSpotsData& parsed) {
           inObject = true;
           objectOverflow = false;
           depth = 1;
+          // Provably false already whenever the previous object closed
+          // properly, but reset alongside the other per-object state rather
+          // than relying on that: a scanner that starts an object from a known
+          // state cannot inherit a desync from the one before it.
+          inString = false;
+          escaped = false;
           objectBuffer = "{";
         } else if (c == ']') {
+          reachedEnd = true;
           finished = true;
         }
         continue;
@@ -757,28 +770,45 @@ DxJsonResult parseIz3mezDxJson(Stream& stream, DxSpotsData& parsed) {
     }
   }
 
-  if (!finished) {
-    Serial.println("DX JSON parse result: stream timeout");
-  }
+  const bool timedOut = !finished;
+  const bool listFull = parsed.spotCount >= kMaxDxSpots;
+  // A short scan only costs something when the list is still unfilled: stopping
+  // early on a full page is the design, not a shortfall.
+  const bool truncated = !reachedEnd && !listFull;
+
+  Serial.print("DX JSON scan ended: ");
+  Serial.print(reachedEnd      ? "end of feed"
+               : timedOut      ? "timeout"
+               : listFull      ? "page full"
+                               : "object cap");
+  Serial.print(", ");
+  Serial.print(parsed.spotCount);
+  Serial.print(" spots of ");
+  Serial.print(objectsScanned);
+  Serial.println(" objects scanned");
+
+  parsed.source = "JSON";
+  parsed.provider = jsonProviderName();
+
   if (parsed.spotCount == 0) {
-    Serial.print("DX JSON parse result: no usable spots in ");
-    Serial.print(objectsScanned);
-    Serial.println(" objects");
-    return objectsScanned > 0 && dxModeFilterIsActive() ? kDxJsonNoMatch : kDxJsonFailed;
+    // Distinguish the three ways of ending up empty. Only the middle one is the
+    // filter's doing; calling a cut-short scan "no matching modes" would blame
+    // the filter for a feed the device never finished reading.
+    parsed.status = truncated                ? "Feed cut short"
+                    : dxModeFilterIsActive() ? "No matching modes"
+                                             : "Parse failed";
+    return truncated                  ? kDxJsonFailed
+           : dxModeFilterIsActive()   ? kDxJsonNoMatch
+                                      : kDxJsonFailed;
   }
 
   parsed.updated = valueOrDash(parsed.updated);
-  parsed.source = "JSON";
-  parsed.provider = jsonProviderName();
   parsed.hasData = true;
-  parsed.status = "OK";
-  Serial.println("DX JSON parse result: OK");
-  Serial.print("DX spots parsed: ");
-  Serial.print(parsed.spotCount);
-  Serial.print(" of ");
-  Serial.print(objectsScanned);
-  Serial.println(" scanned");
-  return kDxJsonOk;
+  // "Partial" reads amber on the DX page, so a page that is short because the
+  // scan ran out of time or objects says so, rather than looking like a quiet
+  // band.
+  parsed.status = truncated ? "Partial" : "OK";
+  return truncated ? kDxJsonPartial : kDxJsonOk;
 }
 
 bool fetchDxSpots() {
@@ -827,12 +857,14 @@ bool fetchDxSpots() {
   const DxJsonResult result = parseIz3mezDxJson(http.getStream(), parsed);
   http.end();
 
-  if (result != kDxJsonOk) {
+  // A partial read still carries spots, so it is shown rather than discarded;
+  // its status says the page may be short.
+  if (result != kDxJsonOk && result != kDxJsonPartial) {
     // Auto mode reads a false here as "JSON had nothing usable" and moves to
     // Telnet, which is the right answer for an empty filter match too: the
-    // stream will find the wanted modes eventually. Only the wording differs.
-    markDxFailure(result == kDxJsonNoMatch ? "No matching modes" : "Parse failed", "JSON",
-                  jsonProviderName());
+    // stream will find the wanted modes eventually. The parse set the wording,
+    // since it is the only thing that knows which way the scan ended.
+    markDxFailure(parsed.status, "JSON", jsonProviderName());
     return false;
   }
 
