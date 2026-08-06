@@ -1,18 +1,15 @@
 name: Claude Code Review
 
-# A LOCAL COPY, deliberately — do not "fix" this into a caller stub.
+# A self-contained copy of the reviewer, deliberately — do not rewrite this as
+# a caller stub that `uses:` a reusable workflow from elsewhere.
 #
-# Every private repo here calls the canonical reviewer in
-# davidjconnolly/shared-workflows. A PUBLIC repo cannot call a PRIVATE repo's
-# reusable workflow: established empirically on 2026-08-05 with identical stubs
-# across five repos — the three private ones resolved and ran, and both public
-# ones failed with "This run likely failed because of a workflow file issue".
-# claudemon does the same thing for the same reason. See
-# https://github.com/davidjconnolly/shared-workflows#access
+# GitHub will not let a public repository call a private repository's reusable
+# workflow. The run fails with "This run likely failed because of a workflow
+# file issue", which reads like a syntax error and is not one. Established
+# empirically on 2026-08-05.
 #
-# What this copy forgoes is the shared workflow's `git patch-id` guard, which
-# skips re-reviewing a diff that a rebase left unchanged. It exists for
-# Dependabot churn; this repo has no dependabot.yml, so it would never fire.
+# Do not rename this file either. External monitoring finds this repo's review
+# runs by this exact filename.
 
 on:
   pull_request:
@@ -45,8 +42,9 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         with:
-          # Fanned out from hermes-config's sync-claude-token.yml, which holds the
-          # single source of truth. Rotation is done there, not here.
+          # Set centrally across repos, not per repo. Rotate at the source; never
+          # mint a fresh token to fix a missing one here, which would invalidate
+          # the working token everywhere else.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "dependabot,hermes-dave,claude-code-dave"
           # 60 turns: re-reviews of multi-commit PRs (read diff + prior threads +

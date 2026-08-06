@@ -52,14 +52,11 @@ can compile against one and fail against the other, which is why CI builds both.
 ## CI
 
 - `build.yml` — builds both environments on every PR.
-- `claude-code-review.yml` — **a local copy of the reviewer, deliberately, not a
-  caller stub.** Every private repo here calls the shared workflow in
-  `davidjconnolly/shared-workflows`; a public repo cannot call a private repo's
-  reusable workflow, so this one keeps its own copy, as claudemon does. Edit it
-  here. The file header carries the evidence.
-- The workflow filename `claude-code-review.yml` is load-bearing: the fleet's
-  `reviewer-health.py` collector fetches runs by that exact filename, and a repo
-  named differently cannot be watched.
-- `CLAUDE_CODE_OAUTH_TOKEN` is fanned out from hermes-config's
-  `sync-claude-token.yml`, which is the single source of truth. Never re-mint a
-  token to fix a missing one — that invalidates the working token everywhere.
+- `claude-code-review.yml` — **a self-contained copy of the reviewer,
+  deliberately, not a caller stub.** A public repo cannot call a private repo's
+  reusable workflow, so this one carries its own. Edit it here; the file header
+  explains the rest. Do not rename the file — external monitoring finds this
+  repo's review runs by that exact filename.
+- `CLAUDE_CODE_OAUTH_TOKEN` is managed centrally across repos rather than set
+  here. Never mint a fresh token to fix a missing one: that invalidates the
+  working token everywhere else.
