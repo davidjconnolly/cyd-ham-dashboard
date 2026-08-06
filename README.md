@@ -2,7 +2,9 @@
 
 A HamClock-inspired ham radio dashboard for the ESP32-2432S028R Cheap Yellow Display.
 
-**[Flash it in your browser with the Web Flasher](https://henryscat.github.io/)**
+This is a fork of [HenrysCat/esp32-cyd-ham-dashboard](https://github.com/HenrysCat/esp32-cyd-ham-dashboard), developed independently. See [Credits](#credits-and-license).
+
+**[Flash the original project in your browser with its Web Flasher](https://henryscat.github.io/)** — note that this serves the upstream firmware, not the builds from this repository.
 
 It provides a touch-controlled 320x240 landscape dashboard with UTC/local time, HamQSL propagation data, a greyline map, DX spots, a DXpedition watchlist, Wi-Fi setup, and a local web settings page.
 
@@ -491,3 +493,9 @@ If `cyd-ham.local` does not resolve, use the IP address instead.
 ### Propagation or DX shows fetch failed
 
 Confirm Wi-Fi is connected and that your network allows HTTPS requests to the configured data source.
+
+## Credits And License
+
+This project is a fork of [HenrysCat/esp32-cyd-ham-dashboard](https://github.com/HenrysCat/esp32-cyd-ham-dashboard) by HenrysCat, who wrote the original dashboard, and it carries on from that work. Everything upstream builds stays theirs; the additions here are the DX Watch page, the spot history backfill, and the DX spot mode filter.
+
+Licensed under the GNU General Public License v3.0, the same licence as the original. See [LICENSE](LICENSE).
