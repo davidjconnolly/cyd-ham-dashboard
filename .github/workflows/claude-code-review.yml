@@ -1,9 +1,30 @@
-name: claude-review
+name: Claude Code Review
+
+# A LOCAL COPY, deliberately — do not "fix" this into a caller stub.
+#
+# Every private repo here calls the canonical reviewer in
+# davidjconnolly/shared-workflows. A PUBLIC repo cannot call a PRIVATE repo's
+# reusable workflow: established empirically on 2026-08-05 with identical stubs
+# across five repos — the three private ones resolved and ran, and both public
+# ones failed with "This run likely failed because of a workflow file issue".
+# claudemon does the same thing for the same reason. See
+# https://github.com/davidjconnolly/shared-workflows#access
+#
+# What this copy forgoes is the shared workflow's `git patch-id` guard, which
+# skips re-reviewing a diff that a rebase left unchanged. It exists for
+# Dependabot churn; this repo has no dependabot.yml, so it would never fire.
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, ready_for_review, reopened]
 
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# NOT optional, and fails silently. This repo's
+# default_workflow_permissions is `read`; delete this block and the reviewer is
+# capped read-only — the job goes green having posted nothing.
 permissions:
   contents: read
   pull-requests: write
@@ -24,9 +45,8 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         with:
-          # Auth via a Claude Pro/Max subscription token (generated with
-          # `claude setup-token`), NOT an Anthropic API key. Store it as the
-          # CLAUDE_CODE_OAUTH_TOKEN repo secret.
+          # Fanned out from hermes-config's sync-claude-token.yml, which holds the
+          # single source of truth. Rotation is done there, not here.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "dependabot,hermes-dave,claude-code-dave"
           # 60 turns: re-reviews of multi-commit PRs (read diff + prior threads +
@@ -53,9 +73,12 @@ jobs:
                 draining a stream to completion
               - anything that breaks either display environment, and TFT drawing
                 that overflows the 320x240 panel or leaves stale pixels behind
-              - settings persistence: keys are limited to 15 characters, and a
-                setting added to AppSettings must be loaded, saved, and normalised
-              - consistency with the idioms and style of the surrounding code
+              - settings persistence: Preferences keys are limited to 15 characters,
+                and a setting added to AppSettings must be loaded, saved, and
+                normalised
+              - once OTA lands: anything that could brick a device mid-flash, and
+                any path where one display variant could be flashed with the other
+                variant's image
             Skip nitpicks and praise; only flag things worth changing. If the
             diff looks clean, say so briefly.
 
