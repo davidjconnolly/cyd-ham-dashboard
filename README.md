@@ -343,7 +343,7 @@ Set **DX source mode** to `Auto` or `Telnet only` for expedition monitoring. A T
 
 Cluster-side filters set against your callsign login still apply, so the watchlist can be combined with a narrowed cluster feed.
 
-The [mode filter](#mode-filter) applies here too: a watched call spotted on a mode you excluded is not registered and does not alert. Leave the modes you are hunting on ticked, or leave the filter off entirely, when waiting on an expedition.
+The [mode filter](#mode-filter) applies here too: a watched call spotted on a mode you excluded is not registered and does not alert. Saving a tighter filter also clears any row already heard on a mode that is now excluded, rather than leaving it showing as on the air for the rest of the hold window — the callsign stays watched, and the next backfill can refill the row from a mode you still want. Leave the modes you are hunting on ticked, or leave the filter off entirely, when waiting on an expedition.
 
 #### History backfill
 

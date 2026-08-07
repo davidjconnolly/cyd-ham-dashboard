@@ -791,15 +791,22 @@ DxJsonResult parseIz3mezDxJson(Stream& stream, DxSpotsData& parsed) {
   parsed.provider = jsonProviderName();
 
   if (parsed.spotCount == 0) {
-    // Distinguish the three ways of ending up empty. Only the middle one is the
-    // filter's doing; calling a cut-short scan "no matching modes" would blame
-    // the filter for a feed the device never finished reading.
-    parsed.status = truncated                ? "Feed cut short"
-                    : dxModeFilterIsActive() ? "No matching modes"
-                                             : "Parse failed";
-    return truncated                  ? kDxJsonFailed
-           : dxModeFilterIsActive()   ? kDxJsonNoMatch
-                                      : kDxJsonFailed;
+    // Four ways to end up with nothing, and only one of them is the filter's
+    // doing. Blaming the filter for any of the others sends someone to the mode
+    // list to fix a problem that is not there — so the feed has to have carried
+    // at least one spot before the filter can be held responsible for the page
+    // being empty.
+    if (truncated) {
+      parsed.status = "Feed cut short";       // never finished reading it
+    } else if (objectsScanned == 0) {
+      parsed.status = "Empty feed";           // well-formed, and holds nothing
+    } else if (dxModeFilterIsActive()) {
+      parsed.status = "No matching modes";    // spots arrived; none were wanted
+      return kDxJsonNoMatch;
+    } else {
+      parsed.status = "Parse failed";         // spots arrived; none were usable
+    }
+    return kDxJsonFailed;
   }
 
   parsed.updated = valueOrDash(parsed.updated);
@@ -1049,7 +1056,12 @@ void requestDxSpotsRefresh() {
   g_refreshRequested = true;
 
   // Saving a tighter mode filter must not leave rows on screen that the filter
-  // now rejects, so drop them here rather than waiting for the next spot.
+  // now rejects, so drop them here rather than waiting for the next spot. The
+  // watchlist gets the same treatment: its rows are just as stale, and left
+  // alone one could sit there "active" for the whole hold window on a mode the
+  // filter would no longer record.
+  dxWatchDropFilteredModes();
+
   uint8_t kept = 0;
   for (uint8_t i = 0; i < g_data.spotCount; ++i) {
     if (!dxModeIsEnabled(g_data.spots[i].mode)) {

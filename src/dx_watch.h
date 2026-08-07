@@ -30,6 +30,12 @@ struct DxWatchEntry {
 void dxWatchBegin();
 void dxWatchReloadPatterns();
 
+// Forgets any row whose heard spot is on a mode the filter now excludes, so a
+// tightened filter clears the rows it would never have recorded. Returns true
+// when something was dropped. The pattern survives, unheard, and the next
+// backfill can refill it from a mode that is still wanted.
+bool dxWatchDropFilteredModes();
+
 // Returns true when the spot changed watchlist state and the display should
 // redraw. Historical spots recovered from a cluster backfill seed the rows
 // without raising an alert, and carry the spot's own timestamp so a six-hour-old
