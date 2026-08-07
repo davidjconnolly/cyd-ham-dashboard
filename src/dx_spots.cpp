@@ -73,6 +73,13 @@ Stream* g_jsonStream = nullptr;
 bool g_jsonStreaming = false;
 uint32_t g_jsonStartedMs = 0;
 DxJsonObjectScanner<kMaxDxObjectChars> g_jsonScanner;
+// One document, reused for every object, and deliberately static rather than
+// heap: the scan is now spread over many loop() iterations, so a document
+// allocated and freed per object would interleave 2 KB churn with the display,
+// the web server and the Telnet buffer for the length of a scan. Fragmentation
+// is the constraint here, not peak usage, so this is kept out of the heap
+// entirely rather than merely allocated less often.
+StaticJsonDocument<kDxObjectDocBytes> g_jsonDoc;
 DxSpotsData g_jsonParsed;
 uint16_t g_jsonObjectsScanned = 0;
 // Captured when the scan starts, because the decision the old synchronous
@@ -712,9 +719,9 @@ enum DxJsonEnd : uint8_t {
 
 // One object at a time, so memory stays flat regardless of feed size.
 void handleJsonObject(const char* json, size_t length) {
-  DynamicJsonDocument doc(kDxObjectDocBytes);
-  if (!deserializeJson(doc, json, length) && doc.is<JsonObject>()) {
-    appendJsonSpot(doc.as<JsonObject>(), g_jsonParsed);
+  g_jsonDoc.clear();
+  if (!deserializeJson(g_jsonDoc, json, length) && g_jsonDoc.is<JsonObject>()) {
+    appendJsonSpot(g_jsonDoc.as<JsonObject>(), g_jsonParsed);
   }
 }
 
@@ -901,12 +908,7 @@ bool startDxJsonScan(bool autoMode, bool reconnectFallback, bool telnetWasActive
   Serial.print("DX URL used: ");
   Serial.println(url);
 
-  const bool secure = url.startsWith("https://");
-  if (secure) {
-    g_jsonSecureClient.setInsecure();
-  }
-  if (!(secure ? g_jsonHttp.begin(g_jsonSecureClient, url)
-               : g_jsonHttp.begin(g_jsonPlainClient, url))) {
+  if (!beginHttp(url, g_jsonHttp, g_jsonPlainClient, g_jsonSecureClient)) {
     Serial.println("DX fetch failure reason: http.begin");
     markDxFailure("Fetch failed", "JSON", jsonProviderName());
     return false;
