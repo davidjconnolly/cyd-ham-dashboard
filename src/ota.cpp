@@ -10,6 +10,12 @@
 #include "settings.h"
 #include "setup_portal.h"
 
+// The Mozilla root CA bundle that the ESP-IDF underneath the Arduino core is
+// built with (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y, DEFAULT_FULL). Linking it
+// costs about 64 KB of flash and is what lets the TLS connections below
+// actually verify who they are talking to.
+extern const uint8_t kRootCaBundle[] asm("_binary_x509_crt_bundle_start");
+
 namespace {
 
 constexpr uint32_t kCheckIntervalMs = 6UL * 60UL * 60UL * 1000UL;
@@ -51,7 +57,17 @@ void setMessage(const String& message) {
 }
 
 bool beginRequest(HTTPClient& http, WiFiClientSecure& client, const String& url) {
-  client.setInsecure();
+  // Verified TLS, not setInsecure(). Nothing else authenticates the image: the
+  // OTA_ASSET_NAME match only proves the release *called* the file that, and
+  // there is no signature to fall back on. So the certificate chain is the one
+  // thing stopping a spoofed AP or a poisoned DNS answer from handing this
+  // device arbitrary code to boot, which is a far worse outcome than the
+  // wrong-variant flash the rest of this file works to prevent.
+  //
+  // Note this build of mbedTLS has CONFIG_MBEDTLS_HAVE_TIME_DATE off, so the
+  // chain is verified but certificate expiry is not checked. That also means
+  // none of this depends on NTP having synced yet.
+  client.setCACertBundle(kRootCaBundle);
   http.setTimeout(kHttpTimeoutMs);
   http.setConnectTimeout(kHttpTimeoutMs);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
@@ -263,8 +279,14 @@ void downloadAndFlash(const String& url) {
       continue;
     }
 
-    const int read = stream->readBytes(
-        buffer, min(static_cast<int>(sizeof(buffer)), available));
+    // Clamped to what the image has left as well as to the buffer, so the
+    // loop's own invariant holds rather than leaning on Update.write to
+    // reject an overrun. A CDN that appends trailing bytes on a keep-alive
+    // connection would otherwise turn a complete download into a write
+    // failure.
+    const int remaining = totalBytes - written;
+    const int wanted = min(min(static_cast<int>(sizeof(buffer)), available), remaining);
+    const int read = stream->readBytes(buffer, wanted);
     if (read <= 0) {
       delay(1);  // available() promised bytes and none came; let the stall timer run
       continue;

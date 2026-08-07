@@ -103,6 +103,7 @@ The device asks GitHub for this repository's latest release, and installs it onl
 - **Automatic installs** are opt-in and off by default. Tick "Install new releases automatically" in the Firmware section to have the device flash a new release as soon as it finds one.
 - **While installing**, the panel shows a progress bar. The DX cluster connection, the setup hotspot and this web page all stop for the duration, so the download has the memory and sockets it needs. Do not power the device off.
 - **If the install fails** the device keeps running the firmware it already has, and everything comes back. The new image is written to the spare flash slot and the board only boots from it once the whole image has been written and verified.
+- **Both the check and the download use verified TLS**, against the Mozilla root CA bundle built into the ESP-IDF. Nothing else authenticates the image — the asset name only says what the release called the file — so the certificate chain is what stops a spoofed access point or a poisoned DNS answer from handing the device arbitrary code to boot. Certificate *expiry* is not checked, because this build of mbedTLS has date validation compiled out.
 
 A build made locally rather than by CI reports its version as `dev`. That never matches a release tag, so a hand-flashed board always sees the newest release as an update rather than quietly believing it is current.
 
@@ -491,7 +492,7 @@ tools/
 - Telnet reading is non-blocking; connection attempts use a short bounded timeout.
 - SD card storage is not required.
 - LVGL is not used.
-- The embedded Greyline map uses flash space; current firmware size is close to the default app partition limit. The `min_spiffs` partition table is used, which gives two 1.9 MB app slots so an over-the-air update can be written to the spare one.
+- The embedded Greyline map uses flash space; current firmware size is close to the default app partition limit. The `min_spiffs` partition table is used, which gives two 1.9 MB app slots so an over-the-air update can be written to the spare one. The build currently sits at about 70% of one slot, roughly 64 KB of which is the root CA bundle the updater needs.
 - The firmware update check is a blocking HTTPS request, unlike the rest of the networking here. It runs once every six hours and takes about a second. The install blocks the loop for its whole duration, deliberately, because the device is about to reboot.
 - The DX watchlist holds up to eight callsigns. Heard state lives in RAM and is cleared by a restart.
 - Watch ages use the spot's own timestamp where the source provides one, falling back to when the device saw it.
