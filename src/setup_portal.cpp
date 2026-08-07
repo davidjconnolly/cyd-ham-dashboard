@@ -21,6 +21,9 @@ constexpr char kApSsid[] = "CYD-HamClock-Setup";
 constexpr char kApPassword[] = "hamclock";
 
 constexpr uint32_t kApAutoOffConfirmMs = 8000;
+// Long enough for a reply to reach the browser before the thing it describes
+// takes the server away, which is the same reason the reboot handler waits.
+constexpr uint32_t kResponseFlushMs = 1500;
 
 DNSServer dnsServer;
 WebServer server(80);
@@ -30,6 +33,8 @@ bool pendingWifiReconnect = false;
 uint32_t pendingWifiReconnectAtMs = 0;
 bool pendingReboot = false;
 uint32_t pendingRebootAtMs = 0;
+bool pendingOtaInstall = false;
+uint32_t pendingOtaInstallAtMs = 0;
 bool hotspotActive = false;
 uint32_t staConfirmedSinceMs = 0;
 
@@ -610,7 +615,13 @@ void handleOtaInstall() {
     server.send(303, "text/plain", "No update available");
     return;
   }
-  otaRequestInstall();
+  // Queued behind a short delay rather than requested outright. otaLoop would
+  // otherwise pick the request up on the very next iteration, about 10 ms from
+  // now, and the first thing the install does is close this server — cutting
+  // off the page below mid-flight, which looks to the browser exactly like a
+  // hang. Same reason and the same wait as the reboot handler.
+  pendingOtaInstall = true;
+  pendingOtaInstallAtMs = millis() + kResponseFlushMs;
   // A redirect would be pointless: this server stops before the browser could
   // follow it. Say what is about to happen instead.
   String html;
@@ -629,7 +640,7 @@ void handleOtaInstall() {
 
 void handleReboot() {
   pendingReboot = true;
-  pendingRebootAtMs = millis() + 1500;
+  pendingRebootAtMs = millis() + kResponseFlushMs;
   server.sendHeader("Location", "/?rebooting=1", true);
   server.send(303, "text/plain", "Restart requested");
 }
@@ -742,5 +753,11 @@ void setupPortalLoop() {
   if (pendingReboot && deadlineReached(nowMs, pendingRebootAtMs)) {
     pendingReboot = false;
     ESP.restart();
+  }
+  // handleClient() has had the intervening iterations to put the confirmation
+  // page on the wire, so the install is free to take the server away now.
+  if (pendingOtaInstall && deadlineReached(nowMs, pendingOtaInstallAtMs)) {
+    pendingOtaInstall = false;
+    otaRequestInstall();
   }
 }
