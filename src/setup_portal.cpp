@@ -11,6 +11,7 @@
 #include "dx_spots.h"
 #include "dx_watch.h"
 #include "greyline.h"
+#include "ota.h"
 #include "propagation.h"
 #include "settings.h"
 
@@ -20,6 +21,9 @@ constexpr char kApSsid[] = "CYD-HamClock-Setup";
 constexpr char kApPassword[] = "hamclock";
 
 constexpr uint32_t kApAutoOffConfirmMs = 8000;
+// Long enough for a reply to reach the browser before the thing it describes
+// takes the server away, which is the same reason the reboot handler waits.
+constexpr uint32_t kResponseFlushMs = 1500;
 
 DNSServer dnsServer;
 WebServer server(80);
@@ -29,6 +33,8 @@ bool pendingWifiReconnect = false;
 uint32_t pendingWifiReconnectAtMs = 0;
 bool pendingReboot = false;
 uint32_t pendingRebootAtMs = 0;
+bool pendingOtaInstall = false;
+uint32_t pendingOtaInstallAtMs = 0;
 bool hotspotActive = false;
 uint32_t staConfirmedSinceMs = 0;
 
@@ -42,12 +48,14 @@ void startHotspot() {
   Serial.println("Setup hotspot is on");
 }
 
-void stopHotspot() {
+void stopHotspot(const char* reason) {
   dnsServer.stop();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
   hotspotActive = false;
-  Serial.println("Setup hotspot turned off (Wi-Fi connection confirmed)");
+  Serial.print("Setup hotspot turned off (");
+  Serial.print(reason);
+  Serial.println(")");
 }
 
 String htmlEscape(const String& input) {
@@ -125,7 +133,7 @@ String statusJson() {
   const DxSpotsData& dx = getDxSpotsData();
 
   String json;
-  json.reserve(520 + (dxWatchCount() * 160));
+  json.reserve(820 + (dxWatchCount() * 160));
   json += F("{\"project\":\"CYD HamClock\",");
   json += F("\"wifi\":");
   json += snapshot.wifiConnected ? F("true") : F("false");
@@ -149,7 +157,28 @@ String statusJson() {
   json += jsonEscape(dxModeFilterIsActive() ? dxModeFilterSummary() : String("all"));
   json += F("\",\"dx_backfill\":\"");
   json += jsonEscape(getDxBackfillStatus());
-  json += F("\",\"dx_watch\":[");
+  const OtaStatus& ota = getOtaStatus();
+  json += F("\",\"version\":\"");
+  json += jsonEscape(otaRunningVersion());
+  json += F("\",\"ota_asset\":\"");
+  json += jsonEscape(otaAssetName());
+  json += F("\",\"ota_status\":\"");
+  json += jsonEscape(ota.message);
+  json += F("\",\"ota_available\":");
+  json += ota.updateAvailable ? F("true") : F("false");
+  json += F(",\"ota_available_version\":\"");
+  json += jsonEscape(ota.availableTag);
+  json += F("\",\"ota_checking\":");
+  json += ota.checking ? F("true") : F("false");
+  json += F(",\"ota_installing\":");
+  json += ota.installing ? F("true") : F("false");
+  json += F(",\"ota_progress\":");
+  json += String(ota.progressPercent);
+  json += F(",\"ota_check_code\":");
+  json += String(ota.lastCheckHttpCode);
+  json += F(",\"ota_auto\":");
+  json += getSettings().otaAutoUpdate ? F("true") : F("false");
+  json += F(",\"dx_watch\":[");
   for (uint8_t i = 0; i < dxWatchCount(); ++i) {
     const DxWatchEntry& entry = dxWatchEntry(i);
     if (i > 0) {
@@ -223,7 +252,7 @@ String pageHtml(const String& message = "") {
   const DxSpotsData& dx = getDxSpotsData();
 
   String html;
-  html.reserve(9000);
+  html.reserve(10500);
   html += F("<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>");
   html += F("<title>CYD HamClock Settings</title><style>");
   html += F("body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#10151c;color:#f3f7fb}");
@@ -429,7 +458,30 @@ String pageHtml(const String& message = "") {
     html += F(" checked");
   }
   html += F(">Flip display 180&deg;</label><small>Enable this if the screen is upside down.</small></div>");
+
+  const OtaStatus& ota = getOtaStatus();
+  html += F("<div class='card'><h2>Firmware</h2>");
+  html += F("<div>Running version: <code>");
+  html += htmlEscape(otaRunningVersion());
+  html += F("</code></div><div>This board installs: <code>");
+  html += htmlEscape(otaAssetName());
+  html += F("</code></div><div>Update status: <code>");
+  html += htmlEscape(ota.message);
+  html += F("</code></div>");
+  html += F("<small>Each release carries one image per display driver. This board will only ever install the asset named above, because the other variant's image leaves the panel garbled and recoverable only over USB.<br>");
+  html += F("A version of <code>dev</code> means this firmware was built locally rather than from a release, so every release looks newer than it.</small>");
+  html += F("<label><input name='otaauto' type='checkbox' value='1'");
+  html += checked(settings.otaAutoUpdate);
+  html += F(">Install new releases automatically</label>");
+  html += F("<small>Off by default. The device checks every six hours; with this ticked it downloads and flashes a new release on its own, which takes the dashboard away for about a minute while it reboots.</small></div>");
+
   html += F("<button type='submit'>Save settings</button></form>");
+  html += F("<form method='post' action='/ota/check'><button type='submit'>Check for update</button></form>");
+  if (ota.updateAvailable) {
+    html += F("<form method='post' action='/ota/install'><button class='danger' type='submit'>Install v");
+    html += htmlEscape(ota.availableTag);
+    html += F(" now</button><small>The device drops off the network while it flashes and reboots. Do not power it off. Progress is shown on the panel.</small></form>");
+  }
   html += F("<form method='post' action='/reboot'><button class='danger' type='submit'>Restart device</button></form>");
   html += F("<p><small>This page is intended for trusted LAN use only. No admin password is configured in this project.</small></p>");
   html += F("<script>");
@@ -464,6 +516,10 @@ void handleRoot() {
     message = "Settings saved.";
   } else if (server.hasArg("rebooting")) {
     message = "Restart requested. The device will be back shortly.";
+  } else if (server.hasArg("checking")) {
+    message = "Checking GitHub for a new release. Reload this page in a few seconds.";
+  } else if (server.hasArg("noupdate")) {
+    message = "No update is available to install. Check for one first.";
   }
   server.send(200, "text/html", pageHtml(message));
 }
@@ -519,6 +575,7 @@ void handleSave() {
   settings.rotate90 = server.hasArg("rot90");
   settings.flip180 = server.hasArg("flip180");
   settings.keepHotspotOn = server.hasArg("keepap");
+  settings.otaAutoUpdate = server.hasArg("otaauto");
   saveSettings(settings);
   dxWatchReloadPatterns();
   // A changed list should answer immediately rather than at the next interval.
@@ -543,9 +600,47 @@ void handleStatusJson() {
   server.send(200, "application/json", statusJson());
 }
 
+// Both OTA endpoints only queue the work. The check is a blocking HTTPS round
+// trip and the install tears this very server down, so neither can run inside
+// a request handler — otaLoop picks them up once the response has gone out.
+void handleOtaCheck() {
+  otaRequestCheck();
+  server.sendHeader("Location", "/?checking=1", true);
+  server.send(303, "text/plain", "Checking for update");
+}
+
+void handleOtaInstall() {
+  if (!getOtaStatus().updateAvailable) {
+    server.sendHeader("Location", "/?noupdate=1", true);
+    server.send(303, "text/plain", "No update available");
+    return;
+  }
+  // Queued behind a short delay rather than requested outright. otaLoop would
+  // otherwise pick the request up on the very next iteration, about 10 ms from
+  // now, and the first thing the install does is close this server — cutting
+  // off the page below mid-flight, which looks to the browser exactly like a
+  // hang. Same reason and the same wait as the reboot handler.
+  pendingOtaInstall = true;
+  pendingOtaInstallAtMs = millis() + kResponseFlushMs;
+  // A redirect would be pointless: this server stops before the browser could
+  // follow it. Say what is about to happen instead.
+  String html;
+  html.reserve(600);
+  html += F("<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>");
+  html += F("<title>Updating</title></head><body style='font-family:system-ui,sans-serif;background:#10151c;color:#f3f7fb;padding:24px'>");
+  html += F("<h1>Updating to v");
+  html += htmlEscape(getOtaStatus().availableTag);
+  html += F("</h1><p>The device is downloading <code>");
+  html += htmlEscape(otaAssetName());
+  html += F("</code> and will reboot into it. Progress is shown on the panel.</p>");
+  html += F("<p>This settings page, the setup hotspot and the DX cluster connection all stop while it flashes. Do not power the device off. It will be back in about a minute.</p>");
+  html += F("<p>If the update fails the device keeps running this firmware and this page comes back.</p></body></html>");
+  server.send(200, "text/html", html);
+}
+
 void handleReboot() {
   pendingReboot = true;
-  pendingRebootAtMs = millis() + 1500;
+  pendingRebootAtMs = millis() + kResponseFlushMs;
   server.sendHeader("Location", "/?rebooting=1", true);
   server.send(303, "text/plain", "Restart requested");
 }
@@ -571,6 +666,8 @@ void setupPortalBegin() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/save", HTTP_POST, handleSave);
   server.on("/status", HTTP_GET, handleStatusJson);
+  server.on("/ota/check", HTTP_POST, handleOtaCheck);
+  server.on("/ota/install", HTTP_POST, handleOtaInstall);
   server.on("/reboot", HTTP_POST, handleReboot);
   server.on("/reboot", HTTP_GET, handleRebootGet);
   server.on("/generate_204", HTTP_GET, handleCaptiveRedirect);
@@ -585,6 +682,30 @@ void setupPortalBegin() {
   Serial.println(kApSsid);
   Serial.print("Portal IP: ");
   Serial.println(WiFi.softAPIP());
+}
+
+void setupPortalPrepareForOta() {
+  server.close();
+  portalStarted = false;
+  if (hotspotActive) {
+    stopHotspot("firmware update");
+  }
+  if (mdnsStarted) {
+    MDNS.end();
+    mdnsStarted = false;
+  }
+  Serial.println("Setup portal stopped for firmware update");
+}
+
+void setupPortalRestoreAfterOta() {
+  // Only reached when the flash failed and the device is still running this
+  // firmware. The routes are still registered on the server object, so
+  // listening again is enough; setupPortalLoop puts the hotspot and mDNS back
+  // according to the current settings and Wi-Fi state.
+  server.begin();
+  portalStarted = true;
+  staConfirmedSinceMs = 0;
+  Serial.println("Setup portal restarted after a failed firmware update");
 }
 
 void setupPortalLoop() {
@@ -615,7 +736,7 @@ void setupPortalLoop() {
     if (staConfirmedSinceMs == 0) {
       staConfirmedSinceMs = nowMs;
     } else if (hotspotActive && deadlineReached(nowMs, staConfirmedSinceMs + kApAutoOffConfirmMs)) {
-      stopHotspot();
+      stopHotspot("Wi-Fi connection confirmed");
     }
   } else {
     staConfirmedSinceMs = 0;
@@ -632,5 +753,11 @@ void setupPortalLoop() {
   if (pendingReboot && deadlineReached(nowMs, pendingRebootAtMs)) {
     pendingReboot = false;
     ESP.restart();
+  }
+  // handleClient() has had the intervening iterations to put the confirmation
+  // page on the wire, so the install is free to take the server away now.
+  if (pendingOtaInstall && deadlineReached(nowMs, pendingOtaInstallAtMs)) {
+    pendingOtaInstall = false;
+    otaRequestInstall();
   }
 }

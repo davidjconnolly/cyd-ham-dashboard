@@ -3,8 +3,9 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
-  workflow_dispatch:
+  workflow_dispatch:   # manual "cut a release now" button (run it on main)
 
 jobs:
   build:
@@ -22,9 +23,121 @@ jobs:
       - name: Build both display variants
         run: pio run
 
+      # Runs on every PR, not just on release, because this is the check that
+      # keeps a board from installing the other driver's image. It reads the
+      # OTA_ASSET_NAME macros out of platformio.ini, gives each image the name
+      # the firmware inside it will ask GitHub for, and fails if an image
+      # carries another environment's name.
+      - name: Name and verify the OTA assets
+        run: python tools/ota_assets.py --stage dist
+
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
-          path: |
-            .pio/build/esp32-2432s028r/firmware.bin
-            .pio/build/esp32-2432s028r-st7789/firmware.bin
+          path: dist/*.bin
+
+  # Every merge to main cuts a release: the patch number is auto-bumped from
+  # the newest v* tag, so the version lives in git history rather than in a
+  # file that has to be hand-edited. Pushing a v* tag yourself still works and
+  # is how you take a minor or major bump (v0.3.0) — the next auto-release
+  # continues from it.
+  #
+  # Devices OTA-install whatever `releases/latest` points at (see src/ota.cpp),
+  # so a release here reaches the hardware. Put [skip release] in the commit
+  # SUBJECT (the squashed PR title) to land a change without shipping it — see
+  # the skip step below for why the subject and not the whole message.
+  release:
+    needs: build
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    # Serialize, so two quick merges cannot compute the same patch number.
+    # GitHub only keeps ONE run pending per group: if a third merge lands while
+    # a second is still queued, the second is cancelled (it shows as cancelled,
+    # not failed). Nothing is lost — the next release builds main HEAD and so
+    # carries the skipped merge's code — but a burst of merges yields one
+    # release covering several of them rather than one release each.
+    concurrency: release
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # the tag history is what the next version is computed from
+
+      # Decided first, before the toolchain is installed: this needs only git,
+      # and everything after it exists solely to produce a release.
+      #
+      # The opt-out matches the commit SUBJECT only. As a job-level
+      # `contains(github.event.head_commit.message, ...)` it would read the
+      # whole message, so a commit whose BODY merely mentioned the token would
+      # skip its own release — and a skipped release looks exactly like a
+      # successful merge, so the failure is silent. Keep the match narrow.
+      - name: Honour [skip release] in the commit subject
+        id: skip
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* || "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            exit 0        # an explicit tag or a manual run always releases
+          fi
+          SUBJECT=$(git log -1 --format=%s)
+          if [[ "$SUBJECT" == *"[skip release]"* ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::'[skip release]' in subject — landing without a release: $SUBJECT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.skip.outputs.skip != 'true'
+        with: { python-version: '3.x' }
+      - run: pip install --upgrade platformio
+        if: steps.skip.outputs.skip != 'true'
+
+      - name: Decide the version to release
+        id: ver
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF_NAME#v}"                       # tag push: honour it verbatim
+            # No existence check: checkout fetches tags, so the tag that
+            # triggered this run is present by definition.
+          else
+            LAST=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+            LAST="${LAST:-v0.0.0}"
+            # Only a strict vMAJOR.MINOR.PATCH tag can be bumped. Anything else
+            # matching the v* glob (v1, v0.3.0-rc1, a typo) would parse into a
+            # bogus version silently, so fail with something readable instead.
+            if [[ ! "$LAST" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::newest tag '$LAST' is not vMAJOR.MINOR.PATCH; cannot auto-bump"
+              exit 1
+            fi
+            IFS=. read -r MAJ MIN PAT <<<"${LAST#v}"
+            VER="$MAJ.$MIN.$((PAT + 1))"                     # merge to main: bump the patch
+            # A computed version that already exists means the bump raced with
+            # another release; fail rather than silently re-point an old tag.
+            if git rev-parse -q --verify "refs/tags/v$VER" >/dev/null; then
+              echo "::error::v$VER already exists" && exit 1
+            fi
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$VER"
+
+      # Rebuilt rather than reusing the build job's artifacts, because those
+      # were compiled without a version stamp and would report themselves as
+      # "dev" forever after being installed.
+      - name: Build both variants stamped with the release version
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          export PLATFORMIO_BUILD_FLAGS='-DFIRMWARE_VERSION=\"'"${{ steps.ver.outputs.version }}"'\"'
+          pio run
+          python tools/ota_assets.py --stage dist
+          ls -l dist
+
+      # Gated too: without this a skipped run would publish a tag named "v"
+      # from the empty version output.
+      - uses: softprops/action-gh-release@v2
+        if: steps.skip.outputs.skip != 'true'
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}   # created at this commit if new
+          name: v${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          files: dist/*.bin

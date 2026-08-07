@@ -41,6 +41,13 @@ can compile against one and fail against the other, which is why CI builds both.
   to `AppSettings`, then loaded in `settingsBegin`, written in `saveSettings`,
   and bounds-checked in `normalizeSettings` — miss one and it silently fails to
   persist or survives as garbage.
+- **A release carries one image per display variant, and a board must never
+  install the other one.** `OTA_ASSET_NAME` is set per environment in
+  `platformio.ini`, compiled into the image, and matched against the release
+  asset name exactly — never by suffix, never "the first `.bin`". `src/ota.h`
+  `#error`s if the flag is missing so a new environment cannot inherit
+  another's asset, and `tools/ota_assets.py` re-checks it in CI on every PR.
+  `FIRMWARE_VERSION` is stamped by CI only; local builds report `dev`.
 - **`include/app_config.h` is tracked and this repo is public.** It holds
   placeholders only. Real Wi-Fi credentials go in through the captive portal or
   the web settings page, never into that file.

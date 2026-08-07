@@ -897,6 +897,24 @@ void dxSpotsBegin() {
   dxWatchBegin();
 }
 
+void dxSpotsPrepareForOta() {
+  stopDxTelnet(true);
+  // stopDxTelnet only *requests* cancellation of an in-flight connect: the
+  // task is sitting in connect() and owns both a socket and its own stack.
+  // Wait for it to notice, rather than starting a flash alongside it. The
+  // bound is its own connect timeout plus a margin, so this cannot hang.
+  const uint32_t deadlineMs = millis() + kTelnetConnectTimeoutMs + 1000;
+  while (g_telnetConnectState == kTelnetConnectRunning &&
+         static_cast<int32_t>(millis() - deadlineMs) < 0) {
+    delay(20);
+  }
+  // The attempt may have succeeded during that wait and handed us a live
+  // client, so tear down once more now that nothing is in flight.
+  stopDxTelnet(true);
+  g_telnetHasCurrentSpots = false;
+  Serial.println("DX Telnet released for firmware update");
+}
+
 String dxFormatFrequency(const String& value) {
   return formatFrequency(value);
 }

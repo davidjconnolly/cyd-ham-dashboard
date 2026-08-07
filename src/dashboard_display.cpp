@@ -1277,6 +1277,44 @@ void displayShowMessage(const String& title, const String& subtitle) {
   drawCentered(subtitle, 132, 2, kMuted);
 }
 
+namespace {
+constexpr int16_t kOtaBarX = 30;
+constexpr int16_t kOtaBarY = 132;
+constexpr int16_t kOtaBarHeight = 18;
+
+int16_t g_otaFilledWidth = 0;
+String g_otaLastDetail;
+}  // namespace
+
+void displayBeginOtaScreen(const String& title, const String& subtitle) {
+  tft.fillScreen(kBg);
+  drawCentered(title, 56, 4, kAccent);
+  drawCentered(subtitle, 96, 2, kMuted);
+
+  const int16_t barWidth = tft.width() - (kOtaBarX * 2);
+  tft.drawRect(kOtaBarX - 1, kOtaBarY - 1, barWidth + 2, kOtaBarHeight + 2, kPanel);
+  tft.fillRect(kOtaBarX, kOtaBarY, barWidth, kOtaBarHeight, kBg);
+  g_otaFilledWidth = 0;
+  g_otaLastDetail = "";
+}
+
+void displayUpdateOtaProgress(uint8_t percent, const String& detail) {
+  if (percent > 100) {
+    percent = 100;
+  }
+  const int16_t barWidth = tft.width() - (kOtaBarX * 2);
+  const int16_t filled = static_cast<int16_t>((static_cast<int32_t>(percent) * barWidth) / 100);
+  // Only the newly filled slice is painted. Redrawing the whole bar on every
+  // one-percent step would flicker, and this runs a hundred times per flash.
+  if (filled > g_otaFilledWidth) {
+    tft.fillRect(kOtaBarX + g_otaFilledWidth, kOtaBarY, filled - g_otaFilledWidth, kOtaBarHeight,
+                 kAccent);
+    g_otaFilledWidth = filled;
+  }
+  drawCenteredField(g_otaLastDetail, String(percent) + "%  " + detail,
+                    kOtaBarY + kOtaBarHeight + 12, 2, kText);
+}
+
 void requestDisplayRedraw() {
   clearPageState();
   g_pageDirty = true;

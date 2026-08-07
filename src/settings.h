@@ -51,6 +51,9 @@ struct AppSettings {
   bool rotate90;
   bool flip180;
   bool keepHotspotOn;
+  // Install a newer release without being asked. Opt-in and off by default:
+  // an update reboots the device and takes the dashboard away for a minute.
+  bool otaAutoUpdate;
 };
 
 void settingsBegin();
