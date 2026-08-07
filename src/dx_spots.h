@@ -39,6 +39,13 @@ struct DxSpotsData {
 
 void dxSpotsBegin();
 bool refreshDxSpotsIfNeeded(bool wifiConnected);
+
+// Drop the persistent Telnet connection and wait out any in-flight connect
+// attempt, so an OTA flash gets the socket and the heap. Safe to call when
+// nothing is connected. If the flash fails the normal reconnect logic takes
+// over again on the next loop.
+void dxSpotsPrepareForOta();
+
 void requestDxSpotsRefresh();
 const DxSpotsData& getDxSpotsData();
 String getDxSpotsUrl();

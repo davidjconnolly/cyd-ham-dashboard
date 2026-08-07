@@ -2,6 +2,7 @@
 
 #include "connectivity.h"
 #include "dashboard_display.h"
+#include "ota.h"
 #include "reset_button.h"
 #include "settings.h"
 #include "setup_portal.h"
@@ -17,6 +18,7 @@ void setup() {
   settingsBegin();
   displayBegin();
   resetButtonBegin();
+  otaBegin();
   setupPortalBegin();
   connectivityBegin();
   displayUpdate(getClockSnapshot());
@@ -25,9 +27,13 @@ void setup() {
 void loop() {
   setupPortalLoop();
   connectivityLoop();
+  const ClockSnapshot snapshot = getClockSnapshot();
+  // After the portal, so a queued check or install runs with its HTTP response
+  // already sent. An install from here never returns: it reboots.
+  otaLoop(snapshot.wifiConnected);
   const bool resettingNow = resetButtonLoop();
   if (!resettingNow) {
-    displayUpdate(getClockSnapshot());
+    displayUpdate(snapshot);
   }
   delay(kLoopDelayMs);
 }

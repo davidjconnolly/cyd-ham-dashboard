@@ -127,6 +127,10 @@ void normalizeSettings(AppSettings& settings) {
   settings.brightnessPercent =
       constrain(settings.brightnessPercent, static_cast<uint8_t>(5),
                 static_cast<uint8_t>(100));
+  // otaAutoUpdate is intentionally absent: getBool() returns either the stored
+  // value or the default, so unlike the numeric and string fields above it has
+  // no out-of-range state to clamp. Noted rather than omitted, because the
+  // load/save/normalise trio is easy to half-finish by accident.
 }
 }
 
@@ -171,6 +175,7 @@ void settingsBegin() {
   currentSettings.rotate90 = preferences.getBool("rot90", false);
   currentSettings.flip180 = preferences.getBool("flip180", false);
   currentSettings.keepHotspotOn = preferences.getBool("apalwayson", false);
+  currentSettings.otaAutoUpdate = preferences.getBool("otaauto", false);
   normalizeSettings(currentSettings);
 }
 
@@ -208,6 +213,7 @@ void saveSettings(const AppSettings& settings) {
   preferences.putBool("rot90", currentSettings.rotate90);
   preferences.putBool("flip180", currentSettings.flip180);
   preferences.putBool("apalwayson", currentSettings.keepHotspotOn);
+  preferences.putBool("otaauto", currentSettings.otaAutoUpdate);
 }
 
 bool hasWifiCredentials() {

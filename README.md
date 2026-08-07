@@ -66,7 +66,14 @@ The board's BOOT button (GPIO0, on the back next to the USB connector) doubles a
 
 ## Flashing A Release Binary
 
-If a `.bin` firmware file is attached to a GitHub release, you can flash it without building from source.
+Every release carries one image per display driver, and they are not interchangeable:
+
+| Asset | Board |
+| --- | --- |
+| `cyd-ham-dashboard-ili9341.bin` | ESP32-2432S028R with the ILI9341 panel (`esp32-2432s028r`) |
+| `cyd-ham-dashboard-st7789.bin` | ESP32-2432S028R with the ST7789 panel (`esp32-2432s028r-st7789`) |
+
+Flashing the wrong one leaves a garbled screen. Nothing is damaged, but the only way back is another flash over USB. If you do not know which panel your board has, flash the ILI9341 image first: it is the more common variant, and a garbled display tells you to try the other.
 
 Install `esptool`:
 
@@ -77,12 +84,29 @@ python -m pip install esptool
 Put the board into normal USB flashing mode, then flash the release binary. Replace `COM5` and the filename as needed:
 
 ```sh
-esptool.py --chip esp32 --port COM5 --baud 460800 write_flash -z 0x10000 firmware.bin
+esptool.py --chip esp32 --port COM5 --baud 460800 write_flash -z 0x10000 cyd-ham-dashboard-ili9341.bin
 ```
 
 If the release includes bootloader and partition binaries, use the release instructions for those exact offsets. For PlatformIO-built firmware, the application binary normally goes at `0x10000`.
 
 After flashing, the board will start its setup access point if Wi-Fi is not configured.
+
+Once a release build is on the board it can update itself over the air; see [Over-The-Air Updates](#over-the-air-updates).
+
+## Over-The-Air Updates
+
+A board running a release build can install later releases itself, over Wi-Fi, with no USB cable. The **Firmware** section of the web settings page shows the running version and offers **Check for update** and, once an update has been found, **Install**.
+
+The device asks GitHub for this repository's latest release, and installs it only if the release carries an asset with exactly the name its own build was compiled to expect — `cyd-ham-dashboard-ili9341.bin` or `cyd-ham-dashboard-st7789.bin`. It will never install the other variant's image, and never falls back to "whichever `.bin` is attached".
+
+- **Checks** happen at start-up and then every six hours, and whenever you press the button. A check only records what is available; it installs nothing on its own.
+- **Automatic installs** are opt-in and off by default. Tick "Install new releases automatically" in the Firmware section to have the device flash a new release as soon as it finds one.
+- **While installing**, the panel shows a progress bar. The DX cluster connection, the setup hotspot and this web page all stop for the duration, so the download has the memory and sockets it needs. Do not power the device off.
+- **If the install fails** the device keeps running the firmware it already has, and everything comes back. The new image is written to the spare flash slot and the board only boots from it once the whole image has been written and verified.
+
+A build made locally rather than by CI reports its version as `dev`. That never matches a release tag, so a hand-flashed board always sees the newest release as an update rather than quietly believing it is current.
+
+Releases are cut automatically when a pull request merges to `main`: the patch number is bumped from the newest `v*` tag and both images are built with that version stamped in. A pull request whose title contains `[skip release]` lands without shipping a release.
 
 ## Building From Source
 
@@ -175,7 +199,9 @@ Available routes:
 
 - `GET /` - settings and status page
 - `POST /save` - save settings
-- `GET /status` - JSON status
+- `GET /status` - JSON status, including the running version and update state
+- `POST /ota/check` - ask GitHub whether a newer release exists
+- `POST /ota/install` - install the release the last check found
 - `POST /reboot` - restart the ESP32
 
 This web UI is intended for a trusted local network. It does not include authentication.
@@ -429,6 +455,7 @@ Default refresh intervals:
 - DX Telnet: persistent connection with reconnect attempts limited to once every 30 seconds
 - Greyline calculations: once per minute
 - Clock: once per second
+- Firmware update check: at start-up, then every 6 hours
 
 Propagation and DX refresh intervals can be changed in the web settings page.
 
@@ -451,6 +478,10 @@ src/
   dx_spots.*            DX JSON fetch plus Telnet connection and parsing
   dx_watch.*            Watched callsign matching, state, and alerts
   dx_backfill.*         Streams recent spot history to seed the watchlist
+  ota.*                 GitHub release check and over-the-air firmware install
+
+tools/
+  ota_assets.py         Names and verifies the per-variant release assets
 ```
 
 ## Notes And Limits
@@ -460,7 +491,8 @@ src/
 - Telnet reading is non-blocking; connection attempts use a short bounded timeout.
 - SD card storage is not required.
 - LVGL is not used.
-- The embedded Greyline map uses flash space; current firmware size is close to the default app partition limit.
+- The embedded Greyline map uses flash space; current firmware size is close to the default app partition limit. The `min_spiffs` partition table is used, which gives two 1.9 MB app slots so an over-the-air update can be written to the spare one.
+- The firmware update check is a blocking HTTPS request, unlike the rest of the networking here. It runs once every six hours and takes about a second. The install blocks the loop for its whole duration, deliberately, because the device is about to reboot.
 - The DX watchlist holds up to eight callsigns. Heard state lives in RAM and is cleared by a restart.
 - Watch ages use the spot's own timestamp where the source provides one, falling back to when the device saw it.
 - The backfill only reaches as far back as its window. A station last spotted before that window shows as not heard until it appears again.
