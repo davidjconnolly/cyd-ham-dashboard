@@ -8,6 +8,22 @@ enum DxSourceMode : uint8_t {
   kDxSourceAuto = 2
 };
 
+// Which spot modes the dashboard registers, stored as a bit mask in
+// AppSettings::dxModeMask. The names behind these bits live in dx_spots.
+enum DxModeBit : uint16_t {
+  kDxModeFt8 = 1 << 0,
+  kDxModeFt4 = 1 << 1,
+  kDxModeCw = 1 << 2,
+  kDxModeSsb = 1 << 3,
+  kDxModeUsb = 1 << 4,
+  kDxModeLsb = 1 << 5,
+  kDxModeRtty = 1 << 6,
+  kDxModeSstv = 1 << 7,
+  kDxModePsk = 1 << 8,
+  kDxModeUnknown = 1 << 9,
+  kDxModeAll = 0x03FF
+};
+
 struct AppSettings {
   String wifiSsid;
   String wifiPassword;
@@ -18,6 +34,7 @@ struct AppSettings {
   bool useJsonPropagationProxy;
   String propagationJsonUrl;
   DxSourceMode dxSourceMode;
+  uint16_t dxModeMask;
   String dxSpotsUrl;
   String dxTelnetHost;
   uint16_t dxTelnetPort;

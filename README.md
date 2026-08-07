@@ -148,6 +148,7 @@ The setup page lets you configure:
 - Maidenhead locator
 - Propagation data source
 - DX source mode, JSON URL, and Telnet host/port
+- DX spot modes to register
 - DX watchlist callsigns and alert behaviour
 - Refresh intervals
 - Backlight brightness
@@ -280,6 +281,28 @@ The device keeps the last good spot list when a refresh or connection fails. The
 
 Callsigns on the DX watchlist are drawn in green in the spot list.
 
+#### Mode filter
+
+**DX spot modes** in the web settings page decides which spots the device registers at all. Tick only `FT8`, for example, and everything else is dropped as it arrives:
+
+```text
+FT8   FT4   CW   SSB   USB   LSB   RTTY   SSTV   PSK
+```
+
+The filter is applied at the point a spot is read, before anything else sees it, so it covers all three sources - the JSON feed, the Telnet stream, and the history backfill - and both pages. A mode that is not ticked never reaches the spot list, the DX Watch rows, or the alerts. Ticking every box, or none, means no filtering.
+
+**Unrecognised modes** is a separate switch, because it is the one that decides how full the page looks:
+
+```text
+[x] Include spots whose mode cannot be worked out
+```
+
+The mode is taken from the spotter's comment, falling back to the FT8 and FT4 calling frequencies when the comment says nothing useful. Many spotters label nothing, so a large share of any feed lands here as `Unknown` - in a sample of 100 spots from the default endpoint, 54 were unlabelled against 35 FT8 and 5 SSB. Leave the box ticked to keep those spots; untick it to see only spots that state their mode, accepting that a genuine SSB or CW contact whose spotter said nothing goes with them.
+
+When a filter is active, the DX page and the DX Watch page show it on their status lines, an empty list reads `No matching spots` rather than `No spots loaded`, and a feed that held nothing in the wanted modes reports `No matching modes` rather than a parse failure. In `Auto` source mode that also hands over to Telnet, which keeps listening for the modes you asked for instead of re-reading the same unmatched feed.
+
+The JSON feed is scanned one spot at a time. With no filter it stops at the eight spots the page holds, exactly as before. With a filter it keeps reading - the whole of a typical feed if need be, bounded by a five second budget - so the page fills with the modes you asked for rather than whatever the feed happened to send first. A narrow filter can still leave fewer than eight rows when the feed genuinely holds fewer, and those spots are correspondingly older.
+
 ### DX Watch
 
 Monitors up to eight callsigns and announces them the moment they are spotted, so the dashboard can be left unattended while waiting for a DXpedition to come on the air.
@@ -319,6 +342,8 @@ Other settings:
 Set **DX source mode** to `Auto` or `Telnet only` for expedition monitoring. A Telnet cluster streams every spot as it is posted, which is what makes the alert timely. JSON polling only reads the newest few spots each refresh and will miss most appearances; the DX Watch page shows a warning when JSON-only mode is selected.
 
 Cluster-side filters set against your callsign login still apply, so the watchlist can be combined with a narrowed cluster feed.
+
+The [mode filter](#mode-filter) applies here too: a watched call spotted on a mode you excluded is not registered and does not alert. Saving a tighter filter also clears any row already heard on a mode that is now excluded, rather than leaving it showing as on the air for the rest of the hold window — the callsign stays watched, and the next backfill can refill the row from a mode you still want. Leave the modes you are hunting on ticked, or leave the filter off entirely, when waiting on an expedition.
 
 #### History backfill
 

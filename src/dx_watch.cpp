@@ -123,6 +123,27 @@ void dxWatchReloadPatterns() {
   Serial.println(g_count);
 }
 
+bool dxWatchDropFilteredModes() {
+  bool changed = false;
+  for (uint8_t i = 0; i < g_count; ++i) {
+    DxWatchEntry& entry = g_entries[i];
+    if (!entry.heard || dxModeIsEnabled(entry.mode)) {
+      continue;
+    }
+
+    // Keep the pattern and drop everything the excluded spot put there. The row
+    // returns to "not heard", which is also what lets the backfill refill it —
+    // history is blocked from overwriting an entry that still counts as heard.
+    const String pattern = entry.pattern;
+    entry = DxWatchEntry();
+    entry.pattern = pattern;
+    changed = true;
+    Serial.print("DX watch cleared by mode filter: ");
+    Serial.println(pattern);
+  }
+  return changed;
+}
+
 bool dxWatchNoteSpot(const DxSpot& spot, bool historical, time_t spotEpoch) {
   if (g_count == 0) {
     return false;

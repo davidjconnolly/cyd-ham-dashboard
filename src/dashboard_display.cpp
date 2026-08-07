@@ -843,7 +843,11 @@ void drawDxPage(const ClockSnapshot& snapshot) {
   }
 
   if (dx.spotCount == 0) {
-    drawCenteredField(g_lastDxEmpty, "No spots loaded", 92, 4, kMuted);
+    // An empty list means something different when the user asked for only a
+    // couple of modes, so say which of the two it is.
+    drawCenteredField(g_lastDxEmpty,
+                      dxModeFilterIsActive() ? "No matching spots" : "No spots loaded", 92, 4,
+                      kMuted);
     for (uint8_t i = 0; i < kMaxDxSpots; ++i) {
       g_lastDxRows[i] = "";
     }
@@ -866,7 +870,11 @@ void drawDxPage(const ClockSnapshot& snapshot) {
   drawLeftField(g_lastDxUpdated, "Updated: " + dx.updated, 8, 186, 2, kMuted, 144);
   drawLeftField(g_lastDxSource, "Source: " + dx.provider, 158, 186, 2,
                 dx.source == "Last good" ? kWarn : kAccent, 158);
-  drawLeftField(g_lastDxStatus, "Status: " + dx.status, 8, 204, 1,
+  const String modeFilter = dxModeFilterSummary();
+  drawLeftField(g_lastDxStatus,
+                modeFilter.length() > 0 ? "Status: " + dx.status + "   " + modeFilter
+                                        : "Status: " + dx.status,
+                8, 204, 1,
                 dx.status == "OK" || dx.status == "Connected" || dx.status == "Reading"
                     ? kAccent
                     : kWarn,
@@ -940,9 +948,13 @@ void drawWatchPage(const ClockSnapshot& snapshot) {
     }
   }
 
+  // The mode filter silently withholds hits from this page, so it has to be
+  // visible here and not only on the spot list.
+  const String modeFilter = dxModeFilterSummary();
   drawLeftField(g_lastWatchSummary,
-                "Watching: " + String(count) + "   Active: " + String(activeCount), 8, 186, 2,
-                activeCount > 0 ? kAlert : kMuted, 300);
+                "Watching: " + String(count) + "   Active: " + String(activeCount) +
+                    (modeFilter.length() > 0 ? "   " + modeFilter : String("")),
+                8, 186, 2, activeCount > 0 ? kAlert : kMuted, 308);
 
   // JSON mode only ever sees the head of the feed once per refresh, so a
   // watched call can easily come and go unseen. Say so on the page itself.
