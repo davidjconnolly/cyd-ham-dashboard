@@ -46,6 +46,11 @@ bool refreshDxSpotsIfNeeded(bool wifiConnected);
 // over again on the next loop.
 void dxSpotsPrepareForOta();
 
+// True while the JSON feed is being read across loop iterations. The scan
+// holds a socket the whole time, so the backfill has to wait its turn — two
+// HTTP streams at once is more than the radio and the heap handle comfortably.
+bool dxJsonScanIsStreaming();
+
 void requestDxSpotsRefresh();
 const DxSpotsData& getDxSpotsData();
 String getDxSpotsUrl();

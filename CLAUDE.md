@@ -10,10 +10,15 @@ their changes.
 - Branch + PR always, never push to `main` — the `protect-main` ruleset requires
   a PR and one approving review, and Dave's admin bypass means a direct push
   would *succeed* rather than fail. Only Dave merges.
-- Verification is `pio run`, which builds **both** display environments. There is
-  no test suite: anything beyond a compile has to be proven on hardware or by
-  replaying real data through the logic, so say plainly which of the two a change
-  has had.
+- Verification is `pio run`, which builds **both** display environments, plus one
+  host test (`tools/test_dx_json_scanner.cpp`, run in CI) covering the DX JSON
+  object scanner against a captured feed. Everything else has to be proven on
+  hardware or by replaying real data through the logic, so say plainly which of
+  the three a change has had.
+- **Logic worth testing belongs in an Arduino-free header.** `src/dx_json_scanner.h`
+  is the pattern: no `String`, no `Stream`, all state in the struct, so the host
+  test compiles the same code the firmware runs rather than a copy of it. Reach
+  for this when a change would otherwise be unverifiable without a board.
 
 ## Build
 

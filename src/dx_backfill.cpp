@@ -307,6 +307,14 @@ bool dxBackfillIfNeeded(bool wifiConnected) {
     return false;
   }
 
+  // The DX JSON scan yields to an in-flight backfill; now that it holds its
+  // stream open across iterations too, the courtesy has to go both ways or the
+  // two can overlap where previously the synchronous fetch made that
+  // impossible.
+  if (dxJsonScanIsStreaming()) {
+    return false;
+  }
+
   const uint32_t nowMs = millis();
   const bool requested = dxWatchBackfillRequested();
   const bool due = g_lastAttemptMs != 0 && nowMs - g_lastAttemptMs >= backfillIntervalMs();
