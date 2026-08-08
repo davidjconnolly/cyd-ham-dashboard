@@ -477,19 +477,22 @@ src/
   propagation.*         HamQSL fetch and parsing
   greyline.*            Solar and greyline calculations
   dx_spots.*            DX JSON fetch plus Telnet connection and parsing
+  dx_json_scanner.h     Resumable JSON object splitter used by the DX feed scan
   dx_watch.*            Watched callsign matching, state, and alerts
   dx_backfill.*         Streams recent spot history to seed the watchlist
   ota.*                 GitHub release check and over-the-air firmware install
 
 tools/
   ota_assets.py         Names and verifies the per-variant release assets
+  test_dx_json_scanner.cpp  Host test for the JSON scanner, run in CI
+  testdata/             A captured DX cluster feed for that test
 ```
 
 ## Notes And Limits
 
 - The setup AP remains available while the device runs.
 - The web UI is for trusted LAN use only.
-- Telnet reading is non-blocking; connection attempts use a short bounded timeout.
+- Telnet reading is non-blocking; connection attempts use a short bounded timeout. The DX JSON feed is read the same way, at most 2 KB per loop, so a mode filter that rejects most of a feed no longer holds the panel while the whole thing is scanned.
 - SD card storage is not required.
 - LVGL is not used.
 - The embedded Greyline map uses flash space; current firmware size is close to the default app partition limit. The `min_spiffs` partition table is used, which gives two 1.9 MB app slots so an over-the-air update can be written to the spare one. The build currently sits at about 70% of one slot, roughly 64 KB of which is the root CA bundle the updater needs.

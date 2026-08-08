@@ -9,6 +9,7 @@
 
 #include "app_config.h"
 #include "dx_backfill.h"
+#include "dx_json_scanner.h"
 #include "dx_watch.h"
 #include "settings.h"
 
@@ -31,6 +32,13 @@ constexpr size_t kDxObjectDocBytes = 2048;
 // page. Without a filter it still stops at the eighth spot. The time budget
 // above is the real guard against a pathologically large endpoint.
 constexpr uint16_t kMaxDxObjectsScanned = 250;
+// Read budget per loop() iteration, matching dx_backfill. The scan is spread
+// across as many iterations as it takes rather than draining the feed in one.
+constexpr size_t kMaxDxJsonBytesPerLoop = 2048;
+// Wall-clock bound on a whole scan, now that it outlives a single call. Longer
+// than the old in-call budget because it now covers the gaps between
+// iterations as well as the reading.
+constexpr uint32_t kDxJsonScanBudgetMs = 20000;
 constexpr uint32_t kTelnetReconnectIntervalMs = 30000;
 constexpr uint32_t kTelnetLoginDelayMs = 1500;
 constexpr int32_t kTelnetConnectTimeoutMs = 5000;
@@ -53,6 +61,33 @@ struct TelnetConnectRequest {
 DxSpotsData g_data;
 uint32_t g_lastAttemptMs = 0;
 bool g_refreshRequested = true;
+
+// --- Incremental JSON scan ---
+// The HTTP client, the stream and the scanner all outlive a single loop()
+// iteration, so the feed is read a bounded slice at a time. Everything the
+// scan needs to resume lives here.
+HTTPClient g_jsonHttp;
+WiFiClient g_jsonPlainClient;
+WiFiClientSecure g_jsonSecureClient;
+Stream* g_jsonStream = nullptr;
+bool g_jsonStreaming = false;
+uint32_t g_jsonStartedMs = 0;
+DxJsonObjectScanner<kMaxDxObjectChars> g_jsonScanner;
+// One document, reused for every object, and deliberately static rather than
+// heap: the scan is now spread over many loop() iterations, so a document
+// allocated and freed per object would interleave 2 KB churn with the display,
+// the web server and the Telnet buffer for the length of a scan. Fragmentation
+// is the constraint here, not peak usage, so this is kept out of the heap
+// entirely rather than merely allocated less often.
+StaticJsonDocument<kDxObjectDocBytes> g_jsonDoc;
+DxSpotsData g_jsonParsed;
+uint16_t g_jsonObjectsScanned = 0;
+// Captured when the scan starts, because the decision the old synchronous
+// fetch made on its return value now has to be made iterations later, when
+// the reason for starting is no longer on the stack.
+bool g_jsonAutoMode = false;
+bool g_jsonReconnectFallback = false;
+bool g_jsonTelnetWasActive = false;
 WiFiClient g_telnetClient;
 String g_telnetLineBuffer;
 bool g_telnetLineOverflow = false;
@@ -671,154 +706,190 @@ enum DxJsonResult : uint8_t {
   kDxJsonFailed
 };
 
-// The feed is scanned one object at a time rather than buffered whole: memory
-// stays flat, and a mode filter can keep reading until it has eight spots it
-// wants instead of eight the feed happened to send first.
-DxJsonResult parseIz3mezDxJson(Stream& stream, DxSpotsData& parsed) {
-  parsed = DxSpotsData();
+// Why a scan stopped. Kept apart from the outcome because the same outcome can
+// be reached several ways and the log line is the only place that distinction
+// survives.
+enum DxJsonEnd : uint8_t {
+  kDxEndArray,         // saw the closing ']' — the whole feed was read
+  kDxEndPageFull,      // eight wanted spots found; the rest of the feed is surplus
+  kDxEndObjectCap,     // read kMaxDxObjectsScanned objects without filling the page
+  kDxEndBudget,        // ran out of wall-clock
+  kDxEndDisconnected   // the feed stopped arriving before it ended
+};
 
-  DynamicJsonDocument doc(kDxObjectDocBytes);
-  String objectBuffer;
-  objectBuffer.reserve(kMaxDxObjectChars);
-
-  bool foundArray = false;
-  bool inObject = false;
-  bool inString = false;
-  bool escaped = false;
-  bool objectOverflow = false;
-  bool finished = false;
-  // Whether the closing ']' was seen. A scan that stops for any other reason
-  // has not seen the whole feed, which the caller has to be able to tell.
-  bool reachedEnd = false;
-  int depth = 0;
-  uint16_t objectsScanned = 0;
-  const uint32_t startMs = millis();
-
-  while (!finished && millis() - startMs < kHttpTimeoutMs) {
-    while (!finished && stream.available() > 0) {
-      const char c = static_cast<char>(stream.read());
-
-      if (!foundArray) {
-        if (c == '[') {
-          foundArray = true;
-        }
-        continue;
-      }
-
-      if (!inObject) {
-        if (c == '{') {
-          inObject = true;
-          objectOverflow = false;
-          depth = 1;
-          // Provably false already whenever the previous object closed
-          // properly, but reset alongside the other per-object state rather
-          // than relying on that: a scanner that starts an object from a known
-          // state cannot inherit a desync from the one before it.
-          inString = false;
-          escaped = false;
-          objectBuffer = "{";
-        } else if (c == ']') {
-          reachedEnd = true;
-          finished = true;
-        }
-        continue;
-      }
-
-      if (objectBuffer.length() < kMaxDxObjectChars) {
-        objectBuffer += c;
-      } else {
-        objectOverflow = true;
-      }
-
-      if (inString) {
-        if (escaped) {
-          escaped = false;
-        } else if (c == '\\') {
-          escaped = true;
-        } else if (c == '"') {
-          inString = false;
-        }
-        continue;
-      }
-
-      if (c == '"') {
-        inString = true;
-      } else if (c == '{') {
-        ++depth;
-      } else if (c == '}') {
-        --depth;
-        if (depth > 0) {
-          continue;
-        }
-
-        inObject = false;
-        ++objectsScanned;
-        if (!objectOverflow) {
-          doc.clear();
-          if (!deserializeJson(doc, objectBuffer) && doc.is<JsonObject>()) {
-            appendJsonSpot(doc.as<JsonObject>(), parsed);
-          }
-        }
-        objectBuffer = "";
-        if (parsed.spotCount >= kMaxDxSpots || objectsScanned >= kMaxDxObjectsScanned) {
-          finished = true;
-        }
-      }
-    }
-    if (!finished) {
-      delay(1);
-    }
+// One object at a time, so memory stays flat regardless of feed size.
+void handleJsonObject(const char* json, size_t length) {
+  g_jsonDoc.clear();
+  if (!deserializeJson(g_jsonDoc, json, length) && g_jsonDoc.is<JsonObject>()) {
+    appendJsonSpot(g_jsonDoc.as<JsonObject>(), g_jsonParsed);
   }
+}
 
-  const bool timedOut = !finished;
-  const bool listFull = parsed.spotCount >= kMaxDxSpots;
+void stopDxJsonStream() {
+  if (g_jsonStreaming) {
+    g_jsonHttp.end();
+  }
+  g_jsonStreaming = false;
+  g_jsonStream = nullptr;
+}
+
+// Everything that used to be decided from fetchDxSpots()'s return value. The
+// answer now arrives several loop iterations after the request, so the reason
+// the scan was started has to be replayed from the captured context rather
+// than read off the stack.
+bool completeDxJsonScan(bool success) {
+  if (!g_jsonAutoMode) {
+    return true;
+  }
+  if (success) {
+    g_autoUsingTelnet = false;
+    g_telnetHasCurrentSpots = false;
+    stopDxTelnet(true);
+    return true;
+  }
+  // Auto mode reads a failure as "JSON had nothing usable" and moves to
+  // Telnet, which is the right answer for an empty filter match too: the
+  // stream will find the wanted modes eventually.
+  g_autoUsingTelnet = true;
+  if (g_jsonReconnectFallback) {
+    stopDxTelnet(true);
+    g_telnetHasCurrentSpots = false;
+  } else if (g_jsonTelnetWasActive) {
+    setTelnetStatus("Reading");
+  }
+  return true;
+}
+
+// Turn a finished scan into a status, a source decision and, when it found
+// anything, the spot list the dashboard renders.
+bool finishDxJsonScan(DxJsonEnd end) {
+  stopDxJsonStream();
+
+  const bool reachedEnd = end == kDxEndArray;
+  const bool listFull = g_jsonParsed.spotCount >= kMaxDxSpots;
   // A short scan only costs something when the list is still unfilled: stopping
   // early on a full page is the design, not a shortfall.
   const bool truncated = !reachedEnd && !listFull;
 
   Serial.print("DX JSON scan ended: ");
-  Serial.print(reachedEnd      ? "end of feed"
-               : timedOut      ? "timeout"
-               : listFull      ? "page full"
-                               : "object cap");
+  Serial.print(end == kDxEndArray          ? "end of feed"
+               : end == kDxEndPageFull     ? "page full"
+               : end == kDxEndObjectCap    ? "object cap"
+               : end == kDxEndDisconnected ? "connection closed"
+                                           : "budget");
   Serial.print(", ");
-  Serial.print(parsed.spotCount);
+  Serial.print(g_jsonParsed.spotCount);
   Serial.print(" spots of ");
-  Serial.print(objectsScanned);
-  Serial.println(" objects scanned");
+  Serial.print(g_jsonObjectsScanned);
+  Serial.print(" objects scanned in ");
+  Serial.print(millis() - g_jsonStartedMs);
+  Serial.println(" ms");
 
-  parsed.source = "JSON";
-  parsed.provider = jsonProviderName();
+  g_jsonParsed.source = "JSON";
+  g_jsonParsed.provider = jsonProviderName();
 
-  if (parsed.spotCount == 0) {
+  DxJsonResult result;
+  if (g_jsonParsed.spotCount == 0) {
     // Four ways to end up with nothing, and only one of them is the filter's
     // doing. Blaming the filter for any of the others sends someone to the mode
     // list to fix a problem that is not there — so the feed has to have carried
     // at least one spot before the filter can be held responsible for the page
     // being empty.
     if (truncated) {
-      parsed.status = "Feed cut short";       // never finished reading it
-    } else if (objectsScanned == 0) {
-      parsed.status = "Empty feed";           // well-formed, and holds nothing
+      g_jsonParsed.status = "Feed cut short";       // never finished reading it
+      result = kDxJsonFailed;
+    } else if (g_jsonObjectsScanned == 0) {
+      g_jsonParsed.status = "Empty feed";           // well-formed, and holds nothing
+      result = kDxJsonFailed;
     } else if (dxModeFilterIsActive()) {
-      parsed.status = "No matching modes";    // spots arrived; none were wanted
-      return kDxJsonNoMatch;
+      g_jsonParsed.status = "No matching modes";    // spots arrived; none were wanted
+      result = kDxJsonNoMatch;
     } else {
-      parsed.status = "Parse failed";         // spots arrived; none were usable
+      g_jsonParsed.status = "Parse failed";         // spots arrived; none were usable
+      result = kDxJsonFailed;
     }
-    return kDxJsonFailed;
+  } else {
+    g_jsonParsed.updated = valueOrDash(g_jsonParsed.updated);
+    g_jsonParsed.hasData = true;
+    // "Partial" reads amber on the DX page, so a page that is short because the
+    // scan ran out of time or objects says so, rather than looking like a quiet
+    // band.
+    g_jsonParsed.status = truncated ? "Partial" : "OK";
+    result = truncated ? kDxJsonPartial : kDxJsonOk;
   }
 
-  parsed.updated = valueOrDash(parsed.updated);
-  parsed.hasData = true;
-  // "Partial" reads amber on the DX page, so a page that is short because the
-  // scan ran out of time or objects says so, rather than looking like a quiet
-  // band.
-  parsed.status = truncated ? "Partial" : "OK";
-  return truncated ? kDxJsonPartial : kDxJsonOk;
+  // A partial read still carries spots, so it is shown rather than discarded;
+  // its status says the page may be short.
+  const bool success = result == kDxJsonOk || result == kDxJsonPartial;
+  if (success) {
+    g_data = g_jsonParsed;
+    Serial.print("DX status message: ");
+    Serial.println(g_data.status);
+  } else {
+    // The scan set the wording, since it is the only thing that knows which way
+    // it ended.
+    markDxFailure(g_jsonParsed.status, "JSON", jsonProviderName());
+  }
+  g_jsonParsed = DxSpotsData();
+  return completeDxJsonScan(success);
 }
 
-bool fetchDxSpots() {
+// Reads at most kMaxDxJsonBytesPerLoop, so the dashboard keeps rendering while
+// a feed the mode filter rejects most of is scanned. Returns true when the
+// display has something new to show, which for a scan still in flight is
+// never.
+bool pumpDxJsonScan() {
+  size_t bytesRead = 0;
+
+  while (bytesRead < kMaxDxJsonBytesPerLoop && g_jsonStream != nullptr &&
+         g_jsonStream->available() > 0) {
+    const int incoming = g_jsonStream->read();
+    if (incoming < 0) {
+      break;
+    }
+    ++bytesRead;
+
+    const auto event = g_jsonScanner.feed(static_cast<char>(incoming));
+    if (event == g_jsonScanner.kArrayEnd) {
+      return finishDxJsonScan(kDxEndArray);
+    }
+    if (event != g_jsonScanner.kObjectReady) {
+      continue;
+    }
+
+    ++g_jsonObjectsScanned;
+    if (!g_jsonScanner.objectOverflowed()) {
+      handleJsonObject(g_jsonScanner.object(), g_jsonScanner.objectLength());
+    }
+    if (g_jsonParsed.spotCount >= kMaxDxSpots) {
+      return finishDxJsonScan(kDxEndPageFull);
+    }
+    if (g_jsonObjectsScanned >= kMaxDxObjectsScanned) {
+      return finishDxJsonScan(kDxEndObjectCap);
+    }
+  }
+
+  // Checked after the read, so a feed that arrives complete inside one slice is
+  // finished by the ']' above rather than being called disconnected.
+  const bool disconnected = g_jsonStream != nullptr && g_jsonStream->available() == 0 &&
+                            !g_jsonPlainClient.connected() && !g_jsonSecureClient.connected();
+  if (disconnected) {
+    return finishDxJsonScan(kDxEndDisconnected);
+  }
+  if (millis() - g_jsonStartedMs >= kDxJsonScanBudgetMs) {
+    return finishDxJsonScan(kDxEndBudget);
+  }
+  return false;
+}
+
+// Opens the feed and hands the reading to pumpDxJsonScan. Returns false when
+// no scan is running afterwards, so the caller can settle the source decision
+// straight away.
+bool startDxJsonScan(bool autoMode, bool reconnectFallback, bool telnetWasActive) {
+  g_jsonAutoMode = autoMode;
+  g_jsonReconnectFallback = reconnectFallback;
+  g_jsonTelnetWasActive = telnetWasActive;
+
   // Two HTTP streams at once is more than the radio and the heap handle
   // comfortably, so yield to an in-flight backfill.
   if (dxBackfillIsStreaming()) {
@@ -837,47 +908,32 @@ bool fetchDxSpots() {
   Serial.print("DX URL used: ");
   Serial.println(url);
 
-  HTTPClient http;
-  WiFiClient plainClient;
-  WiFiClientSecure secureClient;
-  if (!beginHttp(url, http, plainClient, secureClient)) {
+  if (!beginHttp(url, g_jsonHttp, g_jsonPlainClient, g_jsonSecureClient)) {
     Serial.println("DX fetch failure reason: http.begin");
     markDxFailure("Fetch failed", "JSON", jsonProviderName());
     return false;
   }
 
-  http.setTimeout(kHttpTimeoutMs);
-  http.setConnectTimeout(kHttpTimeoutMs);
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  const int httpCode = http.GET();
+  g_jsonHttp.setTimeout(kHttpTimeoutMs);
+  g_jsonHttp.setConnectTimeout(kHttpTimeoutMs);
+  g_jsonHttp.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  const int httpCode = g_jsonHttp.GET();
   Serial.print("DX HTTP status code: ");
   Serial.println(httpCode);
 
   if (httpCode != HTTP_CODE_OK) {
-    http.end();
+    g_jsonHttp.end();
     Serial.println("DX fetch failure reason: HTTP status");
     markDxFailure("Fetch failed", "JSON", jsonProviderName());
     return false;
   }
 
-  DxSpotsData parsed;
-  const DxJsonResult result = parseIz3mezDxJson(http.getStream(), parsed);
-  http.end();
-
-  // A partial read still carries spots, so it is shown rather than discarded;
-  // its status says the page may be short.
-  if (result != kDxJsonOk && result != kDxJsonPartial) {
-    // Auto mode reads a false here as "JSON had nothing usable" and moves to
-    // Telnet, which is the right answer for an empty filter match too: the
-    // stream will find the wanted modes eventually. The parse set the wording,
-    // since it is the only thing that knows which way the scan ended.
-    markDxFailure(parsed.status, "JSON", jsonProviderName());
-    return false;
-  }
-
-  g_data = parsed;
-  Serial.print("DX status message: ");
-  Serial.println(g_data.status);
+  g_jsonScanner.reset();
+  g_jsonParsed = DxSpotsData();
+  g_jsonObjectsScanned = 0;
+  g_jsonStream = &g_jsonHttp.getStream();
+  g_jsonStreaming = true;
+  g_jsonStartedMs = millis();
   return true;
 }
 }
@@ -893,12 +949,16 @@ void dxSpotsBegin() {
   g_autoUsingTelnet = false;
   g_telnetHasCurrentSpots = false;
   stopDxTelnet(true);
+  stopDxJsonStream();
   g_refreshRequested = true;
   dxWatchBegin();
 }
 
 void dxSpotsPrepareForOta() {
   stopDxTelnet(true);
+  // The JSON scan now holds a socket of its own between iterations, so it has
+  // to be dropped for the flash as well.
+  stopDxJsonStream();
   // stopDxTelnet only *requests* cancellation of an in-flight connect: the
   // task is sitting in connect() and owns both a socket and its own stack.
   // Wait for it to notice, rather than starting a flash alongside it. The
@@ -913,6 +973,10 @@ void dxSpotsPrepareForOta() {
   stopDxTelnet(true);
   g_telnetHasCurrentSpots = false;
   Serial.println("DX Telnet released for firmware update");
+}
+
+bool dxJsonScanIsStreaming() {
+  return g_jsonStreaming;
 }
 
 String dxFormatFrequency(const String& value) {
@@ -1002,6 +1066,7 @@ bool refreshDxSpotsIfNeeded(bool wifiConnected) {
 
   if (g_lastSourceMode != static_cast<uint8_t>(mode)) {
     stopDxTelnet(true);
+    stopDxJsonStream();
     g_telnetHasCurrentSpots = false;
     g_autoUsingTelnet = false;
     g_lastAttemptMs = 0;
@@ -1012,6 +1077,7 @@ bool refreshDxSpotsIfNeeded(bool wifiConnected) {
 
   if (!wifiConnected) {
     stopDxTelnet(true);
+    stopDxJsonStream();
     g_telnetHasCurrentSpots = false;
     g_lastAttemptMs = nowMs - intervalMs + 5000UL;
     g_refreshRequested = false;
@@ -1023,12 +1089,23 @@ bool refreshDxSpotsIfNeeded(bool wifiConnected) {
 
   if (mode == kDxSourceJson) {
     stopDxTelnet(false);
+    if (g_jsonStreaming) {
+      // A refresh request means the settings changed under the scan, so its
+      // results would be stale on arrival. Abandon it and start again below.
+      if (!g_refreshRequested) {
+        return pumpDxJsonScan() || changed;
+      }
+      stopDxJsonStream();
+    }
     if (!g_refreshRequested && !due) {
       return changed;
     }
     g_lastAttemptMs = nowMs;
     g_refreshRequested = false;
-    return fetchDxSpots() || changed;
+    if (!startDxJsonScan(false, false, false)) {
+      changed |= completeDxJsonScan(false);
+    }
+    return changed;
   }
 
   if (mode == kDxSourceTelnet) {
@@ -1042,26 +1119,30 @@ bool refreshDxSpotsIfNeeded(bool wifiConnected) {
     return loopDxTelnet() || changed;
   }
 
+  if (g_jsonStreaming) {
+    if (g_refreshRequested) {
+      stopDxJsonStream();   // stale before it finishes; restarted below
+    } else {
+      changed |= pumpDxJsonScan();
+      // Telnet keeps running underneath an in-flight scan while it is the
+      // active source, exactly as it did while the old fetch blocked.
+      if (g_autoUsingTelnet) {
+        changed |= loopDxTelnet();
+      }
+      return changed;
+    }
+  }
+
   if (g_refreshRequested || due) {
     const bool reconnectFallback = g_refreshRequested;
     const bool telnetWasActive = g_autoUsingTelnet && g_telnetConnected;
     g_lastAttemptMs = nowMs;
     g_refreshRequested = false;
-    if (fetchDxSpots()) {
-      g_autoUsingTelnet = false;
-      g_telnetHasCurrentSpots = false;
-      stopDxTelnet(true);
-      return true;
+    // The source decision now waits for finishDxJsonScan; only a scan that
+    // never started is settled here.
+    if (!startDxJsonScan(true, reconnectFallback, telnetWasActive)) {
+      changed |= completeDxJsonScan(false);
     }
-
-    g_autoUsingTelnet = true;
-    if (reconnectFallback) {
-      stopDxTelnet(true);
-      g_telnetHasCurrentSpots = false;
-    } else if (telnetWasActive) {
-      setTelnetStatus("Reading");
-    }
-    changed = true;
   }
 
   if (g_autoUsingTelnet) {
