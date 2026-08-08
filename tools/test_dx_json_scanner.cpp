@@ -7,9 +7,9 @@
 // can prove against a captured feed, and it is why this fix did not need a
 // board to land.
 //
-// Build and run:
+// Build and run (the test data directory defaults to tools/testdata):
 //   c++ -std=c++17 -I src -o /tmp/test_dx_json_scanner tools/test_dx_json_scanner.cpp
-//   /tmp/test_dx_json_scanner tools/testdata/iz3mez_spots.json
+//   /tmp/test_dx_json_scanner
 
 #include "dx_json_scanner.h"
 
@@ -76,19 +76,24 @@ ScanResult scanInSlices(const std::string& feed, size_t budget) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2) {
-    std::cerr << "usage: " << argv[0] << " <feed.json> [--dump]\n";
-    return 2;
-  }
-  std::ifstream in(argv[1], std::ios::binary);
+  // Same argument shape as the other host tests: an optional test data
+  // directory, so CI can run them all from one loop.
+  const std::string dir = (argc > 1 && argv[1][0] != '-') ? argv[1] : "tools/testdata";
+  const std::string path = dir + "/iz3mez_spots.json";
+  std::ifstream in(path, std::ios::binary);
   if (!in) {
-    std::cerr << "cannot open " << argv[1] << "\n";
+    std::cerr << "cannot open " << path << "\n";
     return 2;
   }
   std::stringstream ss;
   ss << in.rdbuf();
   const std::string feed = ss.str();
-  const bool dump = argc > 2 && std::string(argv[2]) == "--dump";
+  bool dump = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--dump") {
+      dump = true;
+    }
+  }
 
   // The capacity the firmware uses (kMaxDxObjectChars).
   constexpr size_t kCapacity = 1536;
@@ -104,7 +109,7 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  std::cout << "feed: " << argv[1] << ", " << feed.size() << " bytes\n\n";
+  std::cout << "feed: " << path << ", " << feed.size() << " bytes\n\n";
 
   std::cout << "Reading the whole feed in one go\n";
   check("the array's end is reached", whole.sawArrayEnd);

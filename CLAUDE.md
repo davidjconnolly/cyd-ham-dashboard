@@ -10,11 +10,16 @@ their changes.
 - Branch + PR always, never push to `main` — the `protect-main` ruleset requires
   a PR and one approving review, and Dave's admin bypass means a direct push
   would *succeed* rather than fail. Only Dave merges.
-- Verification is `pio run`, which builds **both** display environments, plus one
-  host test (`tools/test_dx_json_scanner.cpp`, run in CI) covering the DX JSON
-  object scanner against a captured feed. Everything else has to be proven on
-  hardware or by replaying real data through the logic, so say plainly which of
-  the three a change has had.
+- Verification is `pio run`, which builds **both** display environments, plus the
+  host tests in `tools/test_*.cpp`, which CI compiles and runs in one loop —
+  adding a file there is enough to get it run. They cover the JSON object
+  scanner, mode inference and watchlist matching against captured feeds in
+  `tools/testdata`. Everything else has to be proven on hardware or by replaying
+  real data through the logic, so say plainly which of the three a change has had.
+- **Inference gets scored, not asserted.** `tools/test_dx_mode_plan.cpp` grades
+  the band plan against spots whose comment already states the mode, so the
+  claim in the README is a measurement that CI re-checks rather than a number
+  someone once wrote down. Do the same for anything else that guesses.
 - **Logic worth testing belongs in an Arduino-free header.** `src/dx_json_scanner.h`
   is the pattern: no `String`, no `Stream`, all state in the struct, so the host
   test compiles the same code the firmware runs rather than a copy of it. Reach

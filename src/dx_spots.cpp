@@ -10,6 +10,7 @@
 #include "app_config.h"
 #include "dx_backfill.h"
 #include "dx_json_scanner.h"
+#include "dx_mode_plan.h"
 #include "dx_watch.h"
 #include "settings.h"
 
@@ -207,12 +208,14 @@ bool containsModeToken(const String& comment, const char* token) {
   return comment.indexOf(token) >= 0;
 }
 
-bool frequencyIsNear(const String& freq, double targetMhz) {
+// Feeds quote kHz or MHz depending on the source, so normalise before any
+// band-plan comparison.
+double frequencyMhz(const String& freq) {
   double mhz = freq.toDouble();
   if (mhz > 1000.0) {
     mhz /= 1000.0;
   }
-  return fabs(mhz - targetMhz) < 0.002;
+  return mhz;
 }
 
 String formatFrequency(String value) {
@@ -235,6 +238,8 @@ String formatFrequency(String value) {
 }
 
 String deriveMode(const String& freq, const String& comment) {
+  // The spotter's own word always wins. Frequency is an inference; a comment
+  // saying RTTY is a fact, and RTTY shares a band segment with FT8.
   const String upperComment = upperCopy(comment);
   for (uint8_t i = 0; i + 1 < kDxModeOptionCount; ++i) {
     if (containsModeToken(upperComment, kDxModeOptions[i].name)) {
@@ -242,16 +247,10 @@ String deriveMode(const String& freq, const String& comment) {
     }
   }
 
-  if (frequencyIsNear(freq, 7.074) || frequencyIsNear(freq, 14.074) ||
-      frequencyIsNear(freq, 21.074) || frequencyIsNear(freq, 28.074)) {
-    return "FT8";
-  }
-  if (frequencyIsNear(freq, 7.047) || frequencyIsNear(freq, 14.080) ||
-      frequencyIsNear(freq, 21.080) || frequencyIsNear(freq, 28.080)) {
-    return "FT4";
-  }
-
-  return "--";
+  // No source in this ecosystem carries the mode as data, so fall back to what
+  // the band plan says about the frequency. See src/dx_mode_plan.h.
+  const char* fromPlan = dxmode::forFrequency(frequencyMhz(freq));
+  return fromPlan != nullptr ? String(fromPlan) : String("--");
 }
 
 bool beginHttp(const String& url, HTTPClient& http, WiFiClient& plainClient,

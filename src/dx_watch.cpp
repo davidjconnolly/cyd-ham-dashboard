@@ -2,6 +2,7 @@
 
 #include <time.h>
 
+#include "dx_call_match.h"
 #include "settings.h"
 
 namespace {
@@ -24,31 +25,11 @@ bool isSeparator(char c) {
 }
 
 // A watched call is spotted in several shapes: bare (3Y0J), with a suffix
-// (3Y0J/MM), or with an operating prefix (FT4/3Y0J). Treat the call as a set of
-// slash-delimited components so all three match a plain pattern, and support a
-// trailing '*' for prefix hunting (VP6*).
+// (3Y0J/MM), or with an operating prefix (FT4/3Y0J). The rules, and why the
+// whole call has to be compared as well as its components, live in
+// src/dx_call_match.h where a host test can reach them.
 bool patternMatches(const String& pattern, const String& call) {
-  if (pattern.length() == 0 || call.length() == 0) {
-    return false;
-  }
-
-  if (pattern.endsWith("*")) {
-    const String stem = pattern.substring(0, pattern.length() - 1);
-    return stem.length() > 0 && call.startsWith(stem);
-  }
-
-  int start = 0;
-  while (start <= static_cast<int>(call.length())) {
-    int end = call.indexOf('/', start);
-    if (end < 0) {
-      end = call.length();
-    }
-    if (call.substring(start, end) == pattern) {
-      return true;
-    }
-    start = end + 1;
-  }
-  return false;
+  return dxCallMatchesPattern(pattern.c_str(), call.c_str());
 }
 
 bool alreadyListed(const String& pattern) {
