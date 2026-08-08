@@ -324,7 +324,13 @@ The filter is applied at the point a spot is read, before anything else sees it,
 [x] Include spots whose mode cannot be worked out
 ```
 
-The mode is taken from the spotter's comment, falling back to the FT8 and FT4 calling frequencies when the comment says nothing useful. Many spotters label nothing, so a large share of any feed lands here as `Unknown` - in a sample of 100 spots from the default endpoint, 54 were unlabelled against 35 FT8 and 5 SSB. Leave the box ticked to keep those spots; untick it to see only spots that state their mode, accepting that a genuine SSB or CW contact whose spotter said nothing goes with them.
+Nothing in the DX cluster world carries the mode as data: the Telnet `DX de` line has no mode field, and neither JSON feed has one either. Every source gives a frequency and a free-text comment, so the mode is either something the spotter typed or something the device works out.
+
+The comment is read first and always believed - a spotter who writes `RTTY` gets RTTY. When it says nothing useful, the frequency is matched against the band plan in `src/dx_mode_plan.h`: the digital calling frequencies name FT8 or FT4 exactly, and the CW and phone segments cover the rest. Measured against 500 real spots, that agrees with the spotters who did state a mode 99.5% of the time, and it leaves 29 spots in 500 unclassified rather than 297.
+
+Two things it deliberately will not guess. The digital sub-band is shared by FT8, FT4, PSK31, RTTY and JS8, so anything in it that is not on a known calling frequency stays `Unknown` instead of being called FT8. And the parts of a band where IARU Region 1 and Region 2 disagree - 40 m most of all, where 7.060-7.125 is phone in Europe and data in the US - are left out, because a confident wrong answer is worse than none.
+
+Leave the box ticked to keep the remainder; untick it to see only spots whose mode is known, accepting that a genuine contact whose spotter said nothing goes with them.
 
 When a filter is active, the DX page and the DX Watch page show it on their status lines, an empty list reads `No matching spots` rather than `No spots loaded`, and a feed that held nothing in the wanted modes reports `No matching modes` rather than a parse failure. In `Auto` source mode that also hands over to Telnet, which keeps listening for the modes you asked for instead of re-reading the same unmatched feed.
 
@@ -379,18 +385,21 @@ Live sources only report spots that arrive *after* the device connects, so a sta
 The default source is DXSummit:
 
 ```text
-http://www.dxsummit.fi/api/v1/spots?limit=500
+http://www.dxsummit.fi/api/v1/spots?limit=1000
 ```
 
-DXSummit's API has no per-callsign filter, only a row limit, so the device pulls a wide window and matches it on the fly. The response is streamed and parsed one object at a time in bounded chunks across loop iterations, so memory stays flat and the display keeps rendering while it downloads.
+DXSummit's API has no per-callsign filter, only a row limit, so the device pulls a wide window and matches it on the fly. Worth knowing that it *silently ignores* query parameters it does not recognise rather than rejecting them, so a filter that looks like it works may simply be doing nothing. The response is streamed and parsed one object at a time in bounded chunks across loop iterations, so memory stays flat and the display keeps rendering while it downloads.
 
-Window sizes, measured against the live feed:
+The window is a row count rather than a time, so it shrinks exactly when the bands are busy. Sizes measured against the live feed at a global rate of about 12 spots per minute:
 
 | `limit` | history covered | transfer |
 | --- | --- | --- |
-| 100 | ~9 minutes | 24 KB |
-| 500 | ~45 minutes | 123 KB |
-| 1000 | ~95 minutes | 246 KB |
+| 100 | ~8 minutes | 25 KB |
+| 500 | ~42 minutes | 126 KB |
+| 1000 (default) | ~83 minutes | 252 KB |
+| 1500 | ~2 hours | 378 KB |
+
+1500 is the practical ceiling: the backfill scanner stops after 1500 objects, so a larger `limit` only downloads rows that are then discarded.
 
 Backfilled rows carry the spot's own timestamp, so a spot from 30 minutes ago reads `30m`, not `now`, and never raises an alert. A live spot always takes precedence over recovered history.
 
@@ -478,14 +487,18 @@ src/
   greyline.*            Solar and greyline calculations
   dx_spots.*            DX JSON fetch plus Telnet connection and parsing
   dx_json_scanner.h     Resumable JSON object splitter used by the DX feed scan
+  dx_mode_plan.h        Band plan used to infer a spot's mode from its frequency
+  dx_call_match.h       Watchlist pattern matching against spotted callsigns
   dx_watch.*            Watched callsign matching, state, and alerts
   dx_backfill.*         Streams recent spot history to seed the watchlist
   ota.*                 GitHub release check and over-the-air firmware install
 
 tools/
   ota_assets.py         Names and verifies the per-variant release assets
-  test_dx_json_scanner.cpp  Host test for the JSON scanner, run in CI
-  testdata/             A captured DX cluster feed for that test
+  test_dx_json_scanner.cpp  Host test for the JSON scanner
+  test_dx_mode_plan.cpp     Host test for mode inference, scored against real spots
+  test_dx_call_match.cpp    Host test for watchlist matching
+  testdata/             Captured DX cluster feeds those tests run against
 ```
 
 ## Notes And Limits

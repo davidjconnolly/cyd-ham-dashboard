@@ -21,9 +21,15 @@ constexpr uint16_t kDefaultDxTelnetPort = 7300;
 constexpr uint16_t kDefaultPropagationRefreshMinutes = 15;
 constexpr uint16_t kDefaultDxRefreshMinutes = 5;
 constexpr uint16_t kDefaultDxWatchHoldMinutes = 15;
-// DXSummit has no per-callsign filter, so the window has to be wide enough to
-// contain a spot from the last hour. 500 rows is roughly 45 minutes.
-constexpr char kDefaultDxBackfillUrl[] = "http://www.dxsummit.fi/api/v1/spots?limit=500";
+// DXSummit has no per-callsign filter — re-checked on 2026-08-08, and note it
+// silently ignores unknown query parameters rather than erroring, so a filter
+// that looks like it works may not be. The window therefore has to be wide
+// enough to contain the spot on its own, and it is a row count rather than a
+// time, so it shrinks exactly when the bands are busy. 1000 rows measured at
+// roughly 83 minutes against a global rate of 12 spots/minute; 500 was about
+// 42, which is short for expedition watching. dx_backfill stops at
+// kMaxObjects (1500), so asking for more than that only wastes download.
+constexpr char kDefaultDxBackfillUrl[] = "http://www.dxsummit.fi/api/v1/spots?limit=1000";
 constexpr uint16_t kDefaultDxWatchBackfillMinutes = 15;
 constexpr uint8_t kDefaultBrightnessPercent = 100;
 

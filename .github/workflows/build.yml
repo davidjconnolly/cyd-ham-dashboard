@@ -17,14 +17,21 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
-      # First, because it takes a second against the firmware build's minute and
-      # a half. src/dx_json_scanner.h is deliberately free of Arduino types so
-      # this runs the same code the firmware does, rather than a copy of it.
-      - name: Test the DX JSON scanner against a captured feed
+      # First, because these take a second between them against the firmware
+      # build's minute and a half. Each one compiles an Arduino-free header from
+      # src/ — the same code the firmware runs, not a copy — and checks it
+      # against captured feeds in tools/testdata. Adding tools/test_*.cpp is
+      # enough to get a new one run.
+      - name: Host tests
         run: |
-          c++ -std=c++17 -Wall -Wextra -Werror -I src \
-            -o /tmp/test_dx_json_scanner tools/test_dx_json_scanner.cpp
-          /tmp/test_dx_json_scanner tools/testdata/iz3mez_spots.json
+          set -euo pipefail
+          for source in tools/test_*.cpp; do
+            name=$(basename "$source" .cpp)
+            echo "::group::$name"
+            c++ -std=c++17 -Wall -Wextra -Werror -I src -o "/tmp/$name" "$source"
+            "/tmp/$name"
+            echo "::endgroup::"
+          done
 
       # Both display variants, because they differ only by an -include of a
       # TFT_eSPI User_Setup header: a change that compiles against one can
