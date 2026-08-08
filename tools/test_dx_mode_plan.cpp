@@ -84,6 +84,17 @@ int main(int argc, char** argv) {
   expectMode(21.140, "FT4");
   expectMode(28.180, "FT4");
 
+  std::cout << "\nBands where FT8 and FT4 are closer together than the tolerance\n";
+  // 17 m and 12 m put them 4 kHz apart, inside the 5 kHz window, so the nearest
+  // frequency has to win rather than whichever is listed first.
+  expectMode(18.100, "FT8");
+  expectMode(18.104, "FT4");
+  expectMode(24.915, "FT8");
+  expectMode(24.919, "FT4");
+  expectMode(24.9166, "FT8");  // between the two, nearer FT8
+  expectMode(24.923, "FT4");   // outside FT8's window entirely
+  expectMode(14.084, "FT4");
+
   std::cout << "\nFrequencies the old table got wrong\n";
   // 21.080/28.080 were listed as FT4 but carry no FT4 activity; they sit in the
   // digital segment, which this plan deliberately declines to name.
@@ -111,6 +122,10 @@ int main(int argc, char** argv) {
   }
 
   int agree = 0, disagree = 0, declined = 0, total = 0, unknownAfter = 0;
+  // Scored separately from the family metric below, which by design forgives
+  // FT8/FT4 confusion — and therefore hid the case where every 18.104 and
+  // 24.919 spot was reported as FT8.
+  int digitalExact = 0, digitalWrong = 0;
   std::string line;
   while (std::getline(in, line)) {
     if (line.empty() || line[0] == '#') {
@@ -132,6 +147,18 @@ int main(int argc, char** argv) {
     if (stated == nullptr) {
       continue;
     }
+    const std::string statedText = stated;
+    if (planned != nullptr && (statedText == "FT8" || statedText == "FT4") &&
+        (std::string(planned) == "FT8" || std::string(planned) == "FT4")) {
+      if (std::string(planned) == statedText) {
+        ++digitalExact;
+      } else {
+        ++digitalWrong;
+        std::cout << "        FT8/FT4 mixup: " << mhz << " MHz plan=" << planned
+                  << " comment=" << stated << "\n";
+      }
+    }
+
     if (planned == nullptr) {
       ++declined;
     } else if (family(planned) == family(stated)) {
@@ -150,6 +177,18 @@ int main(int argc, char** argv) {
   std::cout << "  band plan committed on " << committed << ", declined " << declined << "\n";
   check("band plan agrees with the spotter at least 97% of the time", accuracy >= 97.0,
         std::to_string(accuracy) + "%");
+  // Not 100%, and it cannot be: on 30 m, 17 m and 12 m the FT8 and FT4 calling
+  // frequencies are 4 kHz apart while spotters round by a couple, so a spot
+  // landing between them is genuinely undecidable from frequency alone. Both
+  // residual cases in the captured feed have the mode in the comment, which the
+  // firmware always prefers, so the device gets them right regardless. The bar
+  // is here to catch a systematic failure — every 18.104 and 24.919 spot being
+  // called FT8, which is what first-match ordering used to do.
+  const int digitalTotal = digitalExact + digitalWrong;
+  const double digitalAccuracy = digitalTotal ? (100.0 * digitalExact / digitalTotal) : 100.0;
+  check("FT8 and FT4 are told apart at least 95% of the time", digitalAccuracy >= 95.0,
+        std::to_string(digitalExact) + "/" + std::to_string(digitalTotal) + " = " +
+            std::to_string(digitalAccuracy) + "%");
   // Guards the actual user-visible complaint: almost every spot showing Unknown.
   check("fewer than 15% of all spots are left with no mode at all",
         total > 0 && (100.0 * unknownAfter / total) < 15.0,

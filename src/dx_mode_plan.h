@@ -80,11 +80,22 @@ inline const char* forFrequency(double mhz) {
       {144.000, 144.160, "CW"}, {144.200, 144.275, "SSB"},
   };
 
+  // The NEAREST calling frequency, not the first one within tolerance. On 17 m
+  // and 12 m the FT8 and FT4 frequencies are only 4 kHz apart — closer than the
+  // tolerance — so first-match ordering reported every 18.104 and 24.919 spot,
+  // both of them FT4 calling frequencies, as FT8.
+  const char* best = nullptr;
+  double bestDelta = 0.0;
   for (size_t i = 0; i < sizeof(kCalling) / sizeof(kCalling[0]); ++i) {
     const double delta = mhz - kCalling[i].mhz;
-    if ((delta < 0 ? -delta : delta) <= kToleranceMhz) {
-      return kCalling[i].mode;
+    const double distance = delta < 0 ? -delta : delta;
+    if (distance <= kToleranceMhz && (best == nullptr || distance < bestDelta)) {
+      best = kCalling[i].mode;
+      bestDelta = distance;
     }
+  }
+  if (best != nullptr) {
+    return best;
   }
   for (size_t i = 0; i < sizeof(kSegments) / sizeof(kSegments[0]); ++i) {
     if (mhz >= kSegments[i].lowMhz && mhz < kSegments[i].highMhz) {
