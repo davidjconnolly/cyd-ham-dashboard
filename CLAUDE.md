@@ -77,3 +77,20 @@ can compile against one and fail against the other, which is why CI builds both.
 - `CLAUDE_CODE_OAUTH_TOKEN` is managed centrally across repos rather than set
   here. Never mint a fresh token to fix a missing one: that invalidates the
   working token everywhere else.
+
+## Review priorities
+
+The Claude PR reviewer reads this file. Beyond the constraints above (bounded
+network reads, heap fragmentation, Preferences keys, per-variant OTA images),
+prioritise:
+
+- correctness bugs and anything that could crash, hang, reboot-loop or trip the
+  task watchdog on-device;
+- memory safety: ArduinoJson document capacities, Arduino `String` lifetimes,
+  `snprintf`/`strlcpy` sizes and fixed-size buffers;
+- anything that breaks either display environment, and TFT drawing that
+  overflows the 320x240 panel or leaves stale pixels behind;
+- a setting added to `AppSettings` that is not loaded, saved and normalised;
+- anything in an OTA path that could brick a device mid-flash.
+
+Skip nitpicks and praise; flag only things worth changing.
